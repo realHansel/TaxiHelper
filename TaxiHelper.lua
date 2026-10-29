@@ -1,5 +1,5 @@
-script_name('Taxi Helper 2.1')
-script_version('2.1')
+script_name('Taxi Helper 2.2')
+script_version('2.2')
 
 require 'lib.moonloader'
 local sampev = require 'samp.events'
@@ -30,7 +30,7 @@ local L = {
     session_sum  = u8'Заработано за сессию:',
     day_sum      = u8'Заработано сегодня:',
     avg          = u8'Средний чек:',
-    menu_title   = 'Taxi Helper  v2.1',
+    menu_title   = 'Taxi Helper  v2.2',
     menu_sub     = u8'Статистика поездок и настройки',
     tab_main     = u8'Главная',
     tab_settings = u8'Настройки',
@@ -922,7 +922,7 @@ function AHKMessage(text, color)
 end
 
 
-local UPDATE_CURRENT_VERSION = '2.1'
+local UPDATE_CURRENT_VERSION = '2.2'
 local UPDATE_INFO_URL = 'https://raw.githubusercontent.com/realHansel/TaxiHelper/main/info.upd'
 local UPDATE_SCRIPT_URL = 'https://raw.githubusercontent.com/realHansel/TaxiHelper/main/TaxiHelper.lua'
 local UPDATE_DLSTATUS = require('moonloader').download_status
@@ -1947,9 +1947,7 @@ local function draw_menu()
     update_draw_button()
 
     draw_with_animation(function()
-        imgui.TextColored(ACCENT, menu_tab == 1 and u8'ГЛАВНАЯ' or (menu_tab == 2 and u8'НАСТРОЙКИ' or u8'ИСТОРИЯ'))
-        imgui.TextColored(MUTED, menu_tab == 1 and u8'Основные показатели работы таксиста' or (menu_tab == 2 and u8'Настройка окон и отображаемых данных' or u8'Статистика по дням и общие итоги'))
-        imgui.Spacing()
+        imgui.Dummy(imgui.ImVec2(0, 32))
         imgui.Separator()
         imgui.Spacing()
 
