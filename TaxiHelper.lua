@@ -1109,7 +1109,7 @@ local function update_draw_button()
     local window_pos = imgui.GetWindowPos()
     local window_width = imgui.GetWindowWidth()
     local btn_w = 255
-    imgui.SetCursorScreenPos(imgui.ImVec2(window_pos.x + window_width - btn_w - 6, window_pos.y + 12))
+    imgui.SetCursorScreenPos(imgui.ImVec2(window_pos.x + window_width - btn_w - 6, window_pos.y + 7))
     if update_state == 'available' then
         imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0.12, 0.32, 0.17, 0.92))
         imgui.PushStyleColor(imgui.Col.ButtonHovered, imgui.ImVec4(0.17, 0.43, 0.21, 1.0))
@@ -1877,7 +1877,7 @@ end
 
 local function draw_menu()
     local io = imgui.GetIO()
-    imgui.SetNextWindowSize(imgui.ImVec2(960, 480), imgui.Cond.FirstUseEver)
+    imgui.SetNextWindowSize(imgui.ImVec2(960, 520), imgui.Cond.Always)
     imgui.SetNextWindowPos(imgui.ImVec2(io.DisplaySize.x / 2, io.DisplaySize.y / 2), imgui.Cond.FirstUseEver, imgui.ImVec2(0.5, 0.5))
 
     imgui.PushStyleVar(imgui.StyleVar.WindowRounding, 3)
@@ -1889,7 +1889,7 @@ local function draw_menu()
     imgui.PushStyleColor(imgui.Col.WindowBg, imgui.ImVec4(0.075, 0.078, 0.085, 0.90))
     imgui.PushStyleColor(imgui.Col.Border, imgui.ImVec4(0.20, 0.21, 0.22, 1.0))
 
-    imgui.Begin(u8'##TaxiHelper', menu_open, imgui.WindowFlags.NoCollapse + imgui.WindowFlags.NoResize + imgui.WindowFlags.NoTitleBar)
+    imgui.Begin(u8'##TaxiHelper', menu_open, imgui.WindowFlags.NoCollapse + imgui.WindowFlags.NoResize + imgui.WindowFlags.NoTitleBar + imgui.WindowFlags.NoScrollbar + imgui.WindowFlags.NoScrollWithMouse)
 
 
     local winPos = imgui.GetWindowPos()
@@ -1943,20 +1943,21 @@ local function draw_menu()
     imgui.EndChild()
 
     imgui.SameLine()
-    imgui.BeginChild('##maincontent', imgui.ImVec2(0, 0), false, imgui.WindowFlags.NoScrollbar)
+    imgui.BeginChild('##maincontent', imgui.ImVec2(0, 0), false, imgui.WindowFlags.NoScrollbar + imgui.WindowFlags.NoScrollWithMouse)
     update_draw_button()
 
     draw_with_animation(function()
-        imgui.Dummy(imgui.ImVec2(0, 32))
-        imgui.Separator()
-        imgui.Spacing()
-
         if menu_tab == 1 then
             draw_overview()
-        elseif menu_tab == 2 then
-            draw_settings()
         else
-            draw_logs()
+            imgui.Dummy(imgui.ImVec2(0, 32))
+            imgui.Separator()
+            imgui.Spacing()
+            if menu_tab == 2 then
+                draw_settings()
+            else
+                draw_logs()
+            end
         end
     end)
 
