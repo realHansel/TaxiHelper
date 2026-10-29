@@ -1109,7 +1109,7 @@ local function update_draw_button()
     local window_pos = imgui.GetWindowPos()
     local window_width = imgui.GetWindowWidth()
     local btn_w = 255
-    imgui.SetCursorScreenPos(imgui.ImVec2(window_pos.x + window_width - btn_w - 6, window_pos.y + 7))
+    imgui.SetCursorScreenPos(imgui.ImVec2(window_pos.x + window_width - btn_w - 6, pos.y))
     if update_state == 'available' then
         imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0.12, 0.32, 0.17, 0.92))
         imgui.PushStyleColor(imgui.Col.ButtonHovered, imgui.ImVec4(0.17, 0.43, 0.21, 1.0))
@@ -1139,7 +1139,7 @@ local function update_draw_button()
         end
         imgui.EndTooltip()
     end
-    imgui.SetCursorScreenPos(pos)
+    imgui.SetCursorScreenPos(imgui.ImVec2(pos.x, pos.y + 36))
 end
 
 local function update_tick()
@@ -1877,7 +1877,7 @@ end
 
 local function draw_menu()
     local io = imgui.GetIO()
-    imgui.SetNextWindowSize(imgui.ImVec2(960, 520), imgui.Cond.Always)
+    imgui.SetNextWindowSize(imgui.ImVec2(960, 580), imgui.Cond.Always)
     imgui.SetNextWindowPos(imgui.ImVec2(io.DisplaySize.x / 2, io.DisplaySize.y / 2), imgui.Cond.FirstUseEver, imgui.ImVec2(0.5, 0.5))
 
     imgui.PushStyleVar(imgui.StyleVar.WindowRounding, 3)
@@ -1950,7 +1950,6 @@ local function draw_menu()
         if menu_tab == 1 then
             draw_overview()
         else
-            imgui.Dummy(imgui.ImVec2(0, 32))
             imgui.Separator()
             imgui.Spacing()
             if menu_tab == 2 then
