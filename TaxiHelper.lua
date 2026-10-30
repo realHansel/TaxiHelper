@@ -87,11 +87,19 @@ local catching     = false
 local catchStart   = 0
 
 local orders     = {}
+local order_is_bot = {}
+local order_seen_at = {}
+local order_retry_at = {}
 local lastPicked = nil
 
 local AUTO          = true
 local NEAREST       = true
-local CATCH_TIMEOUT = 1.5
+local CATCH_TIMEOUT = 3500
+local ORDER_RETRY_DELAY = 4000
+local ORDER_STALE_MS = 120000
+local ORDER_COLLECT_MS = 160
+local order_collect_start = 0
+local order_collect_until = 0
 
 local DIALOG_CONFIRM = 15324
 local DIALOG_START   = 26919
@@ -610,6 +618,8 @@ function setActive(state, reason)
     active = state
     busy, catching = false, false
     orders, lastPicked = {}, nil
+    order_is_bot, order_seen_at, order_retry_at = {}, {}, {}
+    order_collect_start, order_collect_until = 0, 0
     local suffix = reason and (' (' .. reason .. ')') or ''
     if active then
         AHKMessage('Ловля ON - ожидание заказов' .. suffix, 0x00FF00)
@@ -619,20 +629,32 @@ function setActive(state, reason)
 end
 
 function pickBest()
-    if busy or catching then return end
+    if not active or busy or catching then return end
 
+    local current = game_ms()
+    if current < order_collect_until then return end
+    order_collect_start, order_collect_until = 0, 0
     local bestId, bestDist
     for oid, dist in pairs(orders) do
-        if not bestDist or (NEAREST and dist < bestDist) then
-            bestId, bestDist = oid, dist
-            if not NEAREST then break end
+        local last_seen = order_seen_at[oid] or current
+        if current - last_seen > ORDER_STALE_MS then
+            orders[oid] = nil
+            order_is_bot[oid] = nil
+            order_seen_at[oid] = nil
+            order_retry_at[oid] = nil
+        elseif (not uib.bot_only.v or order_is_bot[oid] == true)
+           and (order_retry_at[oid] or 0) <= current then
+            if not bestDist or (NEAREST and dist < bestDist) then
+                bestId, bestDist = oid, dist
+                if not NEAREST then break end
+            end
         end
     end
 
     if bestId then
         lastPicked = bestId
         catching = true
-        catchStart = os.clock()
+        catchStart = current
         sendcef('pickOrderWorker|' .. bestId)
         AHKMessage(('Ловлю #%d (%d м)'):format(bestId, bestDist), 0xFFFF00)
     end
@@ -646,36 +668,95 @@ local function onCef(str)
     end
 
     if str:find('event.arizonaDriver.initializeOrders', 1, true) then
-        if busy then return end
         local max_dist = tonumber(uib.max_distance.v) or 3500
-        for obj in str:gmatch('{(.-)}') do
-            local oid = tonumber(obj:match('"id"%s*:%s*(%d+)'))
-            local dist = tonumber(obj:match('"distance"%s*:%s*(%d+)'))
-            local free = obj:match('"active"%s*:%s*(%d+)') == '0'
-            local name = obj:match('"name"%s*:%s*"([^"]*)"')
-            local bot_allowed = not uib.bot_only.v or name == ''
-            if oid and dist and free and dist <= max_dist and bot_allowed then
+        local current = game_ms()
+        local seen = 0
+        local eligible_seen = false
+
+        local function register_order(obj)
+            if type(obj) ~= 'table' then return end
+            local oid = tonumber(obj.id)
+            local dist = tonumber(obj.distance)
+            local rating = tonumber(obj.rating)
+            local free = tonumber(obj.active) == 0
+            if oid == nil then return end
+            seen = seen + 1
+            if dist and free and dist <= max_dist then
                 orders[oid] = dist
-            elseif oid and uib.bot_only.v then
+                order_is_bot[oid] = rating ~= nil and rating >= 4.999
+                order_seen_at[oid] = current
+                if not uib.bot_only.v or order_is_bot[oid] then
+                    eligible_seen = true
+                end
+                if uib.bot_only.v then
+                    print(('[TaxiHelper][BotFilter] id=%d dist=%d rating=%s bot=%s busy=%s'):format(
+                        oid, dist, tostring(rating), tostring(order_is_bot[oid]), tostring(busy)))
+                end
+            else
                 orders[oid] = nil
+                order_is_bot[oid] = nil
+                order_seen_at[oid] = nil
+                order_retry_at[oid] = nil
+                if uib.bot_only.v then
+                    print(('[TaxiHelper][BotFilter] skip id=%d dist=%s rating=%s active=%s limit=%d'):format(
+                        oid, tostring(dist), tostring(rating), tostring(obj.active), max_dist))
+                end
             end
         end
-        pickBest()
+
+        local payload = str:match('`(.-)`')
+        if payload and type(decodeJson) == 'function' then
+            local ok, parsed = pcall(decodeJson, payload)
+            if ok and type(parsed) == 'table' then
+                local function walk(node, depth)
+                    if depth > 5 or type(node) ~= 'table' then return end
+                    if node.id ~= nil then
+                        register_order(node)
+                    else
+                        for _, item in pairs(node) do walk(item, depth + 1) end
+                    end
+                end
+                walk(parsed, 1)
+            end
+        end
+
+        if seen == 0 then
+            for obj in str:gmatch('{(.-)}') do
+                register_order({
+                    id = obj:match('"id"%s*:%s*(%d+)'),
+                    name = obj:match('"name"%s*:%s*"([^"]*)"'),
+                    rating = obj:match('"rating"%s*:%s*([%d%.]+)'),
+                    distance = obj:match('"distance"%s*:%s*(%d+)'),
+                    active = obj:match('"active"%s*:%s*(%d+)')
+                })
+            end
+        end
+        if uib.bot_only.v and seen == 0 then
+            print('[TaxiHelper][BotFilter] initializeOrders received, but no valid orders were parsed')
+        end
+        if eligible_seen and not busy and not catching then
+            if order_collect_until == 0 or current >= order_collect_until then
+                order_collect_start = current
+                order_collect_until = current + ORDER_COLLECT_MS
+            end
+        end
         return
     end
 
     if str:find('initializeDriverPage', 1, true) and str:find('"order"', 1, true) then
-        busy = true
-        catching = false
-        orders = {}
-        AHKMessage('Заказ пойман -> везём', 0x00FF00)
+        if not busy then
+            busy = true
+            catching = false
+            if lastPicked then
+                orders[lastPicked] = nil
+                order_is_bot[lastPicked] = nil
+                order_seen_at[lastPicked] = nil
+                order_retry_at[lastPicked] = nil
+            end
+            lastPicked = nil
+            AHKMessage('Заказ пойман -> везём', 0x00FF00)
+        end
         return
-    end
-
-    if busy and str:find('updateCustomizedCounterVisibility', 1, true) and str:find('false', 1, true) then
-        busy = false
-        orders = {}
-        AHKMessage('Доставил -> ждём заказ', 0x00FF00)
     end
 end
 
@@ -714,8 +795,10 @@ function sampev.onServerMessage(_, text)
             setActive(false, 'работа закончена')
         elseif clean:find('Вы прервали заказ', 1, true) then
             busy, catching = false, false
-            orders = {}
-                    AHKMessage('Заказ прерван -> ждём новый', 0xFFAA00)
+            if lastPicked then orders[lastPicked] = nil end
+            lastPicked = nil
+            AHKMessage('Заказ прерван -> ждём новый', 0xFFAA00)
+            pickBest()
         end
     end
 
@@ -753,6 +836,13 @@ function sampev.onServerMessage(_, text)
         local n = clean:match('%+(%d+)%s*Ларцов')
         if n then pending_boxes = tonumber(n) end
     elseif clean:find('Вы доставили клиента по имени') then
+        if active and busy then
+            busy = false
+            catching = false
+            lastPicked = nil
+            AHKMessage('Доставил -> ждём заказ', 0x00FF00)
+            pickBest()
+        end
         local t = now()
         pending_deliveries[#pending_deliveries + 1] = t
         if #pending_deliveries > MAX_PENDING_PAYMENTS then
@@ -802,7 +892,13 @@ function sampev.onShowDialog(id, style, title, b1, b2, text)
 
     if text:find('Заказ уже принят или отменён', 1, true) then
         sampSendDialogResponse(id, 1, -1, '')
-        if lastPicked then orders[lastPicked] = nil end
+        if lastPicked then
+            orders[lastPicked] = nil
+            order_is_bot[lastPicked] = nil
+            order_seen_at[lastPicked] = nil
+            order_retry_at[lastPicked] = nil
+            lastPicked = nil
+        end
         if catching and not busy then
             catching = false
             pickBest()
@@ -1694,7 +1790,7 @@ local function draw_settings()
     menu_section(L.sec_orders)
     if ui_toggle('bot_only', L.bot_only, uib.bot_only) then
         ui_commit('bot_only')
-        orders = {}
+        if not busy and not catching then pickBest() end
     end
     icon_text('distance', L.order_dist)
     imgui.SameLine(200)
@@ -2277,6 +2373,7 @@ function main()
 
     local last_connected = false
     local last_tick = 0
+    local last_order_poll = 0
 
     while true do
         imgui.Process = gta and (show.v or notification.active or menu_open.v)
@@ -2290,14 +2387,21 @@ function main()
         end
 
         if active then
-            local clock = os.clock()
+            local clock = game_ms()
             if catching and clock - catchStart > CATCH_TIMEOUT then
                 catching = false
-                if lastPicked then orders[lastPicked] = nil end
+                if lastPicked then
+                    if uib.bot_only.v then
+                        print(('[TaxiHelper][BotFilter] timeout id=%d, retry after %d ms'):format(lastPicked, ORDER_RETRY_DELAY))
+                    end
+                    order_retry_at[lastPicked] = clock + ORDER_RETRY_DELAY
+                    lastPicked = nil
+                end
+            end
+            if not busy and not catching and clock - last_order_poll >= 40 then
+                last_order_poll = clock
                 pickBest()
             end
-
-
         end
 
         local t = now()
