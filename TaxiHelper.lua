@@ -1,5 +1,5 @@
-script_name('Taxi Helper 2.2')
-script_version('2.2')
+script_name('Taxi Helper 2.2.1')
+script_version('2.2.1')
 
 require 'lib.moonloader'
 local sampev = require 'samp.events'
