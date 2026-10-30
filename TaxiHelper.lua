@@ -605,87 +605,11 @@ local function handle_informer(payload)
     end
 end
 
-local bot_call_notices = {}
-local bot_cef_unmatched = {}
-local bot_known_order_ids = {}
-local bot_approved_order_ids = {}
-local BOT_MATCH_MS = 5000
-local BOT_SETTLE_MS = 350
-local BOT_APPROVAL_MS = 15000
-local bot_last_player_notice = -100000
-
-local function bot_reset_tracking()
-    bot_call_notices = {}
-    bot_cef_unmatched = {}
-    bot_known_order_ids = {}
-    bot_approved_order_ids = {}
-    bot_last_player_notice = -100000
-end
-
-local function bot_register_chat_call(clean)
-    if not active or not uib.bot_only.v then return end
-    local is_bot = clean:match('^%[Такси%]%s*Поступил новый заказ%s*%(%s*клиент:%s*[^,%)]+') ~= nil
-    local is_player = clean:match('^%[Такси%]%s*Поступил новый заказ от%s+[^%s%(]+') ~= nil
-    if not is_bot and not is_player then return end
-    local ms = game_ms()
-    bot_call_notices[#bot_call_notices + 1] = {kind = is_bot and 'bot' or 'player', t = ms}
-    if is_player then bot_last_player_notice = ms end
-end
-
-local function bot_resolve_calls()
-    if not active or not uib.bot_only.v or busy or catching then return end
-    local t = game_ms()
-    local remaining_notices = {}
-    for _, n in ipairs(bot_call_notices) do
-        if t - n.t <= BOT_MATCH_MS then
-            remaining_notices[#remaining_notices + 1] = n
-        end
-    end
-    bot_call_notices = remaining_notices
-
-    local pending = {}
-    for id, meta in pairs(bot_cef_unmatched) do
-        if t - meta.t <= BOT_MATCH_MS and orders[id] then
-            pending[#pending + 1] = {id = id, t = meta.t}
-        else
-            bot_cef_unmatched[id] = nil
-        end
-    end
-    if #pending == 0 or #bot_call_notices == 0 then return end
-    if #pending ~= #bot_call_notices then return end
-
-    local only_bot, only_player, earliest = true, true, t
-    for _, n in ipairs(bot_call_notices) do
-        if n.kind ~= 'bot' then only_bot = false end
-        if n.kind ~= 'player' then only_player = false end
-        if n.t < earliest then earliest = n.t end
-    end
-    for _, v in ipairs(pending) do
-        if v.t < earliest then earliest = v.t end
-    end
-    if t - earliest < BOT_SETTLE_MS then return end
-    if not only_bot and not only_player then return end
-    if only_bot and t - bot_last_player_notice < BOT_MATCH_MS then return end
-
-    for _, v in ipairs(pending) do
-        bot_cef_unmatched[v.id] = nil
-        if only_bot then
-            bot_approved_order_ids[v.id] = t
-        else
-            orders[v.id] = nil
-            bot_approved_order_ids[v.id] = nil
-        end
-    end
-    bot_call_notices = {}
-    if only_bot then pickBest() end
-end
-
 function setActive(state, reason)
     if active == state then return end
     active = state
     busy, catching = false, false
     orders, lastPicked = {}, nil
-    bot_reset_tracking()
     local suffix = reason and (' (' .. reason .. ')') or ''
     if active then
         AHKMessage('Ловля ON - ожидание заказов' .. suffix, 0x00FF00)
@@ -699,9 +623,7 @@ function pickBest()
 
     local bestId, bestDist
     for oid, dist in pairs(orders) do
-        local allowed = not uib.bot_only.v or
-            (bot_approved_order_ids[oid] and game_ms() - bot_approved_order_ids[oid] <= BOT_APPROVAL_MS)
-        if allowed and (not bestDist or (NEAREST and dist < bestDist)) then
+        if not bestDist or (NEAREST and dist < bestDist) then
             bestId, bestDist = oid, dist
             if not NEAREST then break end
         end
@@ -720,12 +642,6 @@ local function onCef(str)
     if not active then return end
 
     if str:find('event.arizonaDriver.initializeClearOrders', 1, true) then
-        if uib.bot_only.v and not catching then
-            orders = {}
-            bot_cef_unmatched = {}
-            bot_known_order_ids = {}
-            bot_approved_order_ids = {}
-        end
         return
     end
 
@@ -733,16 +649,15 @@ local function onCef(str)
         if busy then return end
         local max_dist = tonumber(uib.max_distance.v) or 3500
         for obj in str:gmatch('{(.-)}') do
-            local oid    = tonumber(obj:match('"id":(%d+)'))
-            local dist   = tonumber(obj:match('"distance":(%d+)'))
-            local free   = obj:match('"active":(%d+)') == '0'
-            local ok = oid and dist and free and (not max_dist or dist <= max_dist)
-            if ok then
+            local oid = tonumber(obj:match('"id"%s*:%s*(%d+)'))
+            local dist = tonumber(obj:match('"distance"%s*:%s*(%d+)'))
+            local free = obj:match('"active"%s*:%s*(%d+)') == '0'
+            local name = obj:match('"name"%s*:%s*"([^"]*)"')
+            local bot_allowed = not uib.bot_only.v or name == ''
+            if oid and dist and free and dist <= max_dist and bot_allowed then
                 orders[oid] = dist
-                if uib.bot_only.v and not bot_known_order_ids[oid] then
-                    bot_cef_unmatched[oid] = {t = game_ms()}
-                    bot_known_order_ids[oid] = true
-                end
+            elseif oid and uib.bot_only.v then
+                orders[oid] = nil
             end
         end
         pickBest()
@@ -753,7 +668,6 @@ local function onCef(str)
         busy = true
         catching = false
         orders = {}
-        bot_reset_tracking()
         AHKMessage('Заказ пойман -> везём', 0x00FF00)
         return
     end
@@ -761,7 +675,6 @@ local function onCef(str)
     if busy and str:find('updateCustomizedCounterVisibility', 1, true) and str:find('false', 1, true) then
         busy = false
         orders = {}
-        bot_reset_tracking()
         AHKMessage('Доставил -> ждём заказ', 0x00FF00)
     end
 end
@@ -795,7 +708,6 @@ end)
 
 function sampev.onServerMessage(_, text)
     local clean = clean_text(text)
-    bot_register_chat_call(clean)
 
     if AUTO and active then
         if clean:find('Вы закончили работу таксистом', 1, true) then
@@ -803,8 +715,7 @@ function sampev.onServerMessage(_, text)
         elseif clean:find('Вы прервали заказ', 1, true) then
             busy, catching = false, false
             orders = {}
-            bot_reset_tracking()
-            AHKMessage('Заказ прерван -> ждём новый', 0xFFAA00)
+                    AHKMessage('Заказ прерван -> ждём новый', 0xFFAA00)
         end
     end
 
@@ -928,6 +839,8 @@ local UPDATE_SCRIPT_URL = 'https://raw.githubusercontent.com/realHansel/TaxiHelp
 local UPDATE_DLSTATUS = require('moonloader').download_status
 local update_state = 'idle'
 local update_latest = ''
+local update_changelog = {}
+local update_dialog_open = imgui.ImBool(false)
 local update_error = ''
 local update_started = 0
 local update_token = 0
@@ -980,6 +893,8 @@ local function update_check()
     end
     update_state = 'checking'
     update_error = ''
+    update_changelog = {}
+    update_dialog_open.v = false
     update_token = update_token + 1
     local token = update_token
     update_started = os.time()
@@ -1003,6 +918,17 @@ local function update_check()
                     return
                 end
                 update_latest = result.version
+                update_changelog = {}
+                if type(result.changelog) == 'table' then
+                    for i = 1, math.min(#result.changelog, 30) do
+                        local entry = result.changelog[i]
+                        if type(entry) == 'string' and #entry > 0 then
+                            update_changelog[#update_changelog + 1] = entry:sub(1, 800)
+                        end
+                    end
+                elseif type(result.changelog) == 'string' and #result.changelog > 0 then
+                    update_changelog[1] = result.changelog:sub(1, 2000)
+                end
                 update_state = update_newer(update_latest, UPDATE_CURRENT_VERSION) and 'available' or 'current'
                 print('[TaxiHelper / Updater] Latest: ' .. update_latest .. '; installed: ' .. UPDATE_CURRENT_VERSION)
             elseif status == UPDATE_DLSTATUS.STATUS_ERROR then
@@ -1098,7 +1024,7 @@ local function update_button_text()
     if update_state == 'available' then return u8'Доступно обновление' .. ' v' .. update_latest end
     if update_state == 'downloading' then return u8'Скачивание...' end
     if update_state == 'installing' then return u8'Установка...' end
-    if update_state == 'current' then return u8'Версия актуальна' end
+    if update_state == 'current' then return u8'Актуальная версия' end
     if update_state == 'unconfigured' then return u8'Обновления не настроены' end
     if update_state == 'error' then return u8'Повторить проверку' end
     return u8'Проверить обновления'
@@ -1119,7 +1045,7 @@ local function update_draw_button()
     end
     if imgui.Button(update_button_text() .. '##taxi_updater', imgui.ImVec2(btn_w, 28)) then
         if update_state == 'available' then
-            update_download()
+            update_dialog_open.v = true
         elseif update_state == 'checking' or update_state == 'downloading' or update_state == 'installing' then
         elseif update_state == 'unconfigured' then
             AHKMessage('Ссылка на обновления не настроена. Заполните UPDATE_INFO_URL и UPDATE_SCRIPT_URL в Lua-файле.')
@@ -1140,6 +1066,58 @@ local function update_draw_button()
         imgui.EndTooltip()
     end
     imgui.SetCursorScreenPos(imgui.ImVec2(pos.x, pos.y + 36))
+end
+
+local function update_draw_dialog()
+    if not update_dialog_open.v or not menu_open.v then return end
+
+    local io = imgui.GetIO()
+    imgui.SetNextWindowSize(imgui.ImVec2(520, 350), imgui.Cond.Always)
+    imgui.SetNextWindowPos(imgui.ImVec2(io.DisplaySize.x * 0.5, io.DisplaySize.y * 0.5), imgui.Cond.Always, imgui.ImVec2(0.5, 0.5))
+    imgui.PushStyleVar(imgui.StyleVar.WindowRounding, 8)
+    imgui.PushStyleVar(imgui.StyleVar.WindowPadding, imgui.ImVec2(18, 16))
+    imgui.PushStyleColor(imgui.Col.WindowBg, imgui.ImVec4(0.075, 0.078, 0.085, 0.99))
+    imgui.PushStyleColor(imgui.Col.Border, imgui.ImVec4(0.20, 0.65, 0.29, 0.90))
+    imgui.Begin(u8'##TaxiHelperUpdateDialog', update_dialog_open,
+        imgui.WindowFlags.NoTitleBar + imgui.WindowFlags.NoResize + imgui.WindowFlags.NoCollapse + imgui.WindowFlags.NoSavedSettings)
+    imgui.PushFont(fontsize)
+
+    imgui.TextColored(imgui.ImVec4(0.26, 0.98, 0.26, 1.0), u8'ДОСТУПНО ОБНОВЛЕНИЕ')
+    imgui.Spacing()
+    imgui.TextColored(imgui.ImVec4(0.62, 0.64, 0.70, 1.0), u8'Установлена версия: ' .. UPDATE_CURRENT_VERSION)
+    imgui.SameLine()
+    imgui.TextColored(imgui.ImVec4(0.35, 1.0, 0.35, 1.0), u8'Новая: ' .. update_latest)
+    imgui.Spacing()
+    imgui.Separator()
+    imgui.TextColored(imgui.ImVec4(0.26, 0.98, 0.26, 1.0), u8'Что нового:')
+
+    imgui.BeginChild('##taxi_update_changelog', imgui.ImVec2(0, 162), true)
+    if #update_changelog == 0 then
+        imgui.TextWrapped(u8'Автор пока не добавил список изменений для этой версии.')
+    else
+        for i, entry in ipairs(update_changelog) do
+            imgui.TextColored(imgui.ImVec4(0.26, 0.98, 0.26, 1.0), tostring(i) .. '.')
+            imgui.SameLine(nil, 6)
+            imgui.TextWrapped(entry)
+            if i < #update_changelog then imgui.Spacing() end
+        end
+    end
+    imgui.EndChild()
+
+    imgui.Spacing()
+    if imgui.Button(u8'Позже##taxi_update_later', imgui.ImVec2(130, 34)) then
+        update_dialog_open.v = false
+    end
+    imgui.SameLine()
+    if imgui.Button(u8'Установить обновление##taxi_update_install', imgui.ImVec2(230, 34)) then
+        update_dialog_open.v = false
+        update_download()
+    end
+
+    imgui.PopFont()
+    imgui.End()
+    imgui.PopStyleColor(2)
+    imgui.PopStyleVar(2)
 end
 
 local function update_tick()
@@ -1717,7 +1695,6 @@ local function draw_settings()
     if ui_toggle('bot_only', L.bot_only, uib.bot_only) then
         ui_commit('bot_only')
         orders = {}
-        bot_reset_tracking()
     end
     icon_text('distance', L.order_dist)
     imgui.SameLine(200)
@@ -2264,6 +2241,7 @@ function imgui.OnDrawFrame()
     if menu_open.v then
         imgui.PushStyleVar(imgui.StyleVar.Alpha, math.max(0.05, menu_fade))
         draw_menu()
+        update_draw_dialog()
         imgui.PopStyleVar()
     end
 end
@@ -2294,16 +2272,24 @@ function main()
     end)
 
 
-    AHKMessage('успешно загружен. Меню - /thelper')
+    AHKMessage('Успешно загружен. Меню - /thelper')
+    local startup_update_notice_pending = true
 
     local last_connected = false
     local last_tick = 0
 
     while true do
         imgui.Process = gta and (show.v or notification.active or menu_open.v)
+        if startup_update_notice_pending then
+            if update_state == 'available' then
+                AHKMessage('Доступно обновление TaxiHelper v' .. update_latest .. '. Откройте /thelper для просмотра изменений.', 0x55FF77)
+                startup_update_notice_pending = false
+            elseif update_state == 'current' or update_state == 'error' or update_state == 'unconfigured' then
+                startup_update_notice_pending = false
+            end
+        end
 
         if active then
-            bot_resolve_calls()
             local clock = os.clock()
             if catching and clock - catchStart > CATCH_TIMEOUT then
                 catching = false
