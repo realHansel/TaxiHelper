@@ -2343,10 +2343,6 @@ function imgui.OnDrawFrame()
 end
 
 function main()
-    imgui.ShowCursor = false
-    imgui.LockPlayer = false
-    menu_open.v = false
-    update_dialog_open.v = false
     while not isSampAvailable() do wait(100) end
 
     fa_ensure_font()
@@ -2442,17 +2438,6 @@ function main()
 
         if update_tick() then
             save()
-            menu_open.v = false
-            update_dialog_open.v = false
-            edit_mode = false
-            imgui.ShowCursor = false
-            imgui.LockPlayer = false
-            imgui.Process = true
-            wait(0)
-            imgui.ShowCursor = false
-            imgui.LockPlayer = false
-            imgui.Process = gta and show.v
-            wait(100)
             thisScript():reload()
             return
         end
