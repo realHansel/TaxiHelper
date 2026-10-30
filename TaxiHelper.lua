@@ -1,4 +1,4 @@
-script_name('Taxi Helper 2.2.1')
+script_name('Taxi Helper 2.2')
 script_version('2.2.1')
 
 require 'lib.moonloader'
@@ -97,7 +97,7 @@ local NEAREST       = true
 local CATCH_TIMEOUT = 3500
 local ORDER_RETRY_DELAY = 4000
 local ORDER_STALE_MS = 120000
-local ORDER_COLLECT_MS = 160
+local ORDER_COLLECT_MS = 50
 local order_collect_start = 0
 local order_collect_until = 0
 
@@ -929,7 +929,7 @@ function AHKMessage(text, color)
 end
 
 
-local UPDATE_CURRENT_VERSION = '2.2'
+local UPDATE_CURRENT_VERSION = '2.2.1'
 local UPDATE_INFO_URL = 'https://raw.githubusercontent.com/realHansel/TaxiHelper/main/info.upd'
 local UPDATE_SCRIPT_URL = 'https://raw.githubusercontent.com/realHansel/TaxiHelper/main/TaxiHelper.lua'
 local UPDATE_DLSTATUS = require('moonloader').download_status
@@ -2343,6 +2343,10 @@ function imgui.OnDrawFrame()
 end
 
 function main()
+    imgui.ShowCursor = false
+    imgui.LockPlayer = false
+    menu_open.v = false
+    update_dialog_open.v = false
     while not isSampAvailable() do wait(100) end
 
     fa_ensure_font()
@@ -2438,7 +2442,17 @@ function main()
 
         if update_tick() then
             save()
-            wait(300)
+            menu_open.v = false
+            update_dialog_open.v = false
+            edit_mode = false
+            imgui.ShowCursor = false
+            imgui.LockPlayer = false
+            imgui.Process = true
+            wait(0)
+            imgui.ShowCursor = false
+            imgui.LockPlayer = false
+            imgui.Process = gta and show.v
+            wait(100)
             thisScript():reload()
             return
         end
