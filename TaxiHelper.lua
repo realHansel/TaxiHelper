@@ -1,5 +1,5 @@
-script_name('Taxi Helper 2.2')
-script_version('2.2.1')
+script_name('Taxi Helper 2.3')
+script_version('2.3')
 
 require 'lib.moonloader'
 local sampev = require 'samp.events'
@@ -30,7 +30,7 @@ local L = {
     session_sum  = u8'Заработано за сессию:',
     day_sum      = u8'Заработано сегодня:',
     avg          = u8'Средний чек:',
-    menu_title   = 'Taxi Helper  v2.2',
+    menu_title   = 'Taxi Helper  v2.3',
     menu_sub     = u8'Статистика поездок и настройки',
     tab_main     = u8'Главная',
     tab_settings = u8'Настройки',
@@ -62,6 +62,10 @@ local L = {
     sec_orders   = u8'ЛОВЛЯ ЗАКАЗОВ',
     order_dist   = u8'Макс. дистанция (м)',
     bot_only     = u8'Принимать заказы только от ботов',
+    sec_goal     = u8'ЦЕЛЬ ЗАРАБОТКА',
+    goal_amount  = u8'Цель на день ($)',
+    goal_off     = u8'0 - отключить отображение цели',
+    goal_caption = u8'ЦЕЛЬ НА ДЕНЬ',
 }
 
 local DOLLAR_COLOR     = imgui.ImVec4(0.35, 1.0, 0.35, 1.0)
@@ -108,20 +112,58 @@ local menu_open      = imgui.ImBool(false)
 local dragStartPos   = nil
 
 local gta = true
+goal_keyboard_editor = false
+goal_keyboard_digits = ''
+goal_keyboard_replace = false
+goal_keyboard_save = false
+goal_keyboard_cancel = false
+
 addEventHandler("onWindowMessage", function(msg, wparam)
     if msg == 6 then
         gta = wparam ~= 0
     end
 
-
-    if msg == 0x100 then 
-        if wparam == 0x1B then 
-            if menu_open.v then
-                menu_open.v = false
-                imgui.ShowCursor = false
-                consumeWindowMessage(true, false)
+    if goal_keyboard_editor then
+        if not menu_open.v then
+            goal_keyboard_editor = false
+        elseif msg == 0x102 then
+            if wparam >= 48 and wparam <= 57 and #goal_keyboard_digits < 12 then
+                local digit = string.char(wparam)
+                if goal_keyboard_replace or goal_keyboard_digits == '0' then
+                    goal_keyboard_digits = digit
+                    goal_keyboard_replace = false
+                else
+                    goal_keyboard_digits = goal_keyboard_digits .. digit
+                end
+            end
+            consumeWindowMessage(true, true)
+            return
+        elseif msg == 0x100 then
+            if wparam == 0x08 then
+                if goal_keyboard_replace then
+                    goal_keyboard_digits = ''
+                    goal_keyboard_replace = false
+                else
+                    goal_keyboard_digits = goal_keyboard_digits:sub(1, -2)
+                end
+                consumeWindowMessage(true, true)
+                return
+            elseif wparam == 0x0D then
+                goal_keyboard_save = true
+                consumeWindowMessage(true, true)
+                return
+            elseif wparam == 0x1B then
+                goal_keyboard_cancel = true
+                consumeWindowMessage(true, true)
+                return
             end
         end
+    end
+
+    if msg == 0x100 and wparam == 0x1B and menu_open.v then
+        menu_open.v = false
+        imgui.ShowCursor = false
+        consumeWindowMessage(true, false)
     end
 end)
 
@@ -131,7 +173,7 @@ local defaults = {
     day     = { date = '', rides = 0, money = 0, worked = 0, boxes = 0, coins = 0, tips = 0, tips_cash = 0 },
     ui      = { notify = 1, s_rides = 1, s_money = 1, s_avg = 1, s_time = 1,
                 d_money = 1, d_worked = 1, d_rides = 1, d_boxes = 1, d_coins = 1, d_tips = 1, d_avg = 0,
-                max_distance = 3500, bot_only = 0 }
+                max_distance = 3500, bot_only = 0, goal_amount = 0 }
 }
 
 local cfg = inicfg.load(defaults, config_path)
@@ -139,7 +181,7 @@ local cfg = inicfg.load(defaults, config_path)
 local UI_DEFAULTS = {
     notify = 1, s_rides = 1, s_money = 1, s_avg = 1, s_time = 1,
     d_money = 1, d_worked = 1, d_rides = 1, d_boxes = 1, d_coins = 1, d_tips = 1, d_avg = 0,
-    max_distance = 3500, bot_only = 0
+    max_distance = 3500, bot_only = 0, goal_amount = 0
 }
 
 if type(cfg.ui) ~= 'table' then cfg.ui = {} end
@@ -148,7 +190,7 @@ local uib = {}
 for key, def in pairs(UI_DEFAULTS) do
     local v = tonumber(cfg.ui[key])
     if v == nil then v = def end
-    if key == 'max_distance' then
+    if key == 'max_distance' or key == 'goal_amount' then
         uib[key] = imgui.ImInt(v)
     else
         uib[key] = imgui.ImBool(v == 1)
@@ -460,6 +502,20 @@ local function format_money(n)
         if k == 0 then break end
     end
     return s
+end
+
+TaxiHelperUi = {}
+TaxiHelperUi.distanceInput = imgui.ImBuffer(32)
+TaxiHelperUi.distanceInput.v = format_money(cfg.ui.max_distance or 3500)
+TaxiHelperUi.numericEditActive = { goal_amount = false, max_distance = false }
+TaxiHelperUi.numericDirty = { goal_amount = false, max_distance = false }
+-- Keyboard events for the goal editor are handled independently of ImGui text focus.
+-- The editor remains functional even when a ride notification steals GUI focus.
+
+function TaxiHelperUi.parseNumber(value)
+    local digits = tostring(value or ''):gsub('[^%d]', '')
+    if digits == '' then return 0 end
+    return tonumber(digits) or 0
 end
 
 local function format_time(sec)
@@ -929,7 +985,7 @@ function AHKMessage(text, color)
 end
 
 
-local UPDATE_CURRENT_VERSION = '2.2.1'
+local UPDATE_CURRENT_VERSION = '2.3'
 local UPDATE_INFO_URL = 'https://raw.githubusercontent.com/realHansel/TaxiHelper/main/info.upd'
 local UPDATE_SCRIPT_URL = 'https://raw.githubusercontent.com/realHansel/TaxiHelper/main/TaxiHelper.lua'
 local UPDATE_DLSTATUS = require('moonloader').download_status
@@ -1764,6 +1820,145 @@ local function draw_overview()
         u8'Сегодня относительно вчера: ' .. (delta >= 0 and '+' or '-') .. '$' .. format_money(math.abs(delta)))
 end
 
+function TaxiHelperUi.actionButton(label, width, height, selected, marked)
+    local base = selected and imgui.ImVec4(0.12, 0.30, 0.17, 0.96)
+        or (marked and imgui.ImVec4(0.11, 0.23, 0.15, 0.96)
+            or imgui.ImVec4(0.12, 0.14, 0.16, 0.98))
+    imgui.PushStyleColor(imgui.Col.Button, base)
+    imgui.PushStyleColor(imgui.Col.ButtonHovered, imgui.ImVec4(0.18, 0.34, 0.22, 1.0))
+    imgui.PushStyleColor(imgui.Col.ButtonActive, imgui.ImVec4(0.20, 0.42, 0.24, 1.0))
+    imgui.PushStyleColor(imgui.Col.Text,
+        selected and imgui.ImVec4(0.48, 1.0, 0.56, 1.0)
+            or imgui.ImVec4(0.91, 0.95, 0.93, 1.0))
+    imgui.PushStyleVar(imgui.StyleVar.FrameRounding, 6)
+    local pressed = imgui.Button(label, imgui.ImVec2(width, height))
+    imgui.PopStyleVar()
+    imgui.PopStyleColor(4)
+    return pressed
+end
+
+function TaxiHelperUi.numericControl(key, input_buffer, label_id, min_value, max_value, step, width)
+    -- Never rewrite the InputText buffer while it is being edited.
+    -- Persist edits when focus leaves the field instead of writing the ini on every key.
+    local was_active = TaxiHelperUi.numericEditActive[key]
+    imgui.PushItemWidth(width)
+    local changed = imgui.InputText(label_id, input_buffer)
+    local active_now = imgui.IsItemActive()
+    imgui.PopItemWidth()
+
+    if changed then
+        local entered = math.floor(TaxiHelperUi.parseNumber(input_buffer.v))
+        entered = math.max(min_value, math.min(max_value, entered))
+        cfg.ui[key] = entered
+        uib[key].v = entered
+        TaxiHelperUi.numericDirty[key] = true
+    end
+
+    if was_active and not active_now and not changed then
+        if TaxiHelperUi.numericDirty[key] then
+            save()
+            TaxiHelperUi.numericDirty[key] = false
+        end
+        input_buffer.v = format_money(cfg.ui[key] or min_value)
+    end
+    TaxiHelperUi.numericEditActive[key] = active_now
+
+    imgui.SameLine(nil, 6)
+    if TaxiHelperUi.actionButton('-##th_minus_' .. key, 30, 28) then
+        local new_amount = math.max(min_value, (tonumber(cfg.ui[key]) or min_value) - step)
+        cfg.ui[key] = new_amount
+        uib[key].v = new_amount
+        input_buffer.v = format_money(new_amount)
+        TaxiHelperUi.numericDirty[key] = false
+        save()
+    end
+    imgui.SameLine(nil, 5)
+    if TaxiHelperUi.actionButton('+##th_plus_' .. key, 30, 28) then
+        local new_amount = math.min(max_value, (tonumber(cfg.ui[key]) or min_value) + step)
+        cfg.ui[key] = new_amount
+        uib[key].v = new_amount
+        input_buffer.v = format_money(new_amount)
+        TaxiHelperUi.numericDirty[key] = false
+        save()
+    end
+end
+
+function TaxiHelperUi.applyGoalAmount(amount)
+    amount = math.max(0, math.min(2000000000, math.floor(tonumber(amount) or 0)))
+    cfg.ui.goal_amount = amount
+    uib.goal_amount.v = amount
+    save()
+end
+
+local function draw_goal_editor()
+    local value = math.max(0, math.floor(tonumber(cfg.ui.goal_amount) or 0))
+    if TaxiHelperUi.actionButton(format_money(value) .. '##th_goal_open', 150, 28) then
+        goal_keyboard_digits = tostring(value)
+        goal_keyboard_replace = true
+        goal_keyboard_save = false
+        goal_keyboard_cancel = false
+        goal_keyboard_editor = true
+    end
+    imgui.SameLine(nil, 6)
+    if TaxiHelperUi.actionButton('-##th_goal_decrease', 30, 28) then
+        TaxiHelperUi.applyGoalAmount(value - 1000000)
+    end
+    imgui.SameLine(nil, 5)
+    if TaxiHelperUi.actionButton('+##th_goal_increase', 30, 28) then
+        TaxiHelperUi.applyGoalAmount(value + 1000000)
+    end
+end
+
+local function draw_goal_edit_dialog()
+    if not goal_keyboard_editor or not menu_open.v then return end
+    if goal_keyboard_cancel then
+        goal_keyboard_editor = false
+        goal_keyboard_cancel = false
+        return
+    end
+    if goal_keyboard_save then
+        TaxiHelperUi.applyGoalAmount(TaxiHelperUi.parseNumber(goal_keyboard_digits))
+        goal_keyboard_editor = false
+        goal_keyboard_save = false
+        return
+    end
+
+    local io = imgui.GetIO()
+    imgui.SetNextWindowSize(imgui.ImVec2(425, 199), imgui.Cond.Always)
+    imgui.SetNextWindowPos(imgui.ImVec2(io.DisplaySize.x / 2, io.DisplaySize.y / 2),
+        imgui.Cond.Always, imgui.ImVec2(0.5, 0.5))
+    imgui.PushStyleVar(imgui.StyleVar.WindowRounding, 9)
+    imgui.PushStyleVar(imgui.StyleVar.WindowPadding, imgui.ImVec2(17, 14))
+    imgui.PushStyleColor(imgui.Col.WindowBg, imgui.ImVec4(0.075, 0.085, 0.09, 0.99))
+    imgui.PushStyleColor(imgui.Col.Border, imgui.ImVec4(0.20, 0.56, 0.29, 0.85))
+    imgui.Begin(u8'##TaxiHelperGoalEdit', nil,
+        imgui.WindowFlags.NoTitleBar + imgui.WindowFlags.NoResize + imgui.WindowFlags.NoSavedSettings + imgui.WindowFlags.NoMove)
+
+    imgui.TextColored(ACCENT, u8'ИЗМЕНЕНИЕ ДНЕВНОЙ ЦЕЛИ')
+    imgui.Separator()
+    imgui.TextColored(MUTED, u8'Начните вводить новую сумму цифрами.')
+    local amount = math.min(2000000000, TaxiHelperUi.parseNumber(goal_keyboard_digits))
+    local blink = (math.floor(os.clock() * 2) % 2 == 0) and '|' or ' '
+    local display = (goal_keyboard_digits == '' and '0' or format_money(amount)) .. blink
+    imgui.PushStyleColor(imgui.Col.ChildWindowBg, imgui.ImVec4(0.13, 0.16, 0.16, 1.0))
+    imgui.BeginChild('##th_goal_keyboard_display', imgui.ImVec2(-1, 38), true, imgui.WindowFlags.NoScrollbar)
+    imgui.TextColored(imgui.ImVec4(0.80, 1.0, 0.85, 1.0), display)
+    imgui.EndChild()
+    imgui.PopStyleColor()
+    imgui.TextColored(MUTED, u8'Сумма после сохранения: $' .. format_money(amount))
+    imgui.Spacing()
+    if TaxiHelperUi.actionButton(u8'Сохранить##th_goal_save', 178, 31, true) then
+        goal_keyboard_save = true
+    end
+    imgui.SameLine(nil, 9)
+    if TaxiHelperUi.actionButton(u8'Отмена##th_goal_cancel', 178, 31) then
+        goal_keyboard_cancel = true
+    end
+    imgui.End()
+    imgui.PopStyleColor(2)
+    imgui.PopStyleVar(2)
+end
+
 local function draw_settings()
     imgui.BeginChild('##settings', imgui.ImVec2(0, 0), false)
 
@@ -1771,11 +1966,17 @@ local function draw_settings()
     if ui_toggle('stats', L.opt_stats, show) then save() end
     if ui_toggle('notify', L.opt_notify, uib.notify) then ui_commit('notify') end
     imgui.Spacing()
-    if imgui.Button('[+] ' .. L.btn_move, imgui.ImVec2(260, 30)) then
+    if TaxiHelperUi.actionButton(L.btn_move .. '##th_move', 280, 32) then
         edit_mode = true
         show.v = true
         menu_open.v = false
     end
+
+    menu_section(L.sec_goal)
+    imgui.Text(L.goal_amount)
+    imgui.SameLine(200)
+    draw_goal_editor()
+    imgui.TextColored(MUTED, L.goal_off)
 
     menu_section(L.sec_session)
     for _, it in ipairs(SESSION_ITEMS) do
@@ -1794,13 +1995,7 @@ local function draw_settings()
     end
     icon_text('distance', L.order_dist)
     imgui.SameLine(200)
-    imgui.PushItemWidth(120)
-    if imgui.InputInt('##max_dist', uib.max_distance, 100, 500) then
-        if uib.max_distance.v < 100 then uib.max_distance.v = 100 end
-        cfg.ui.max_distance = uib.max_distance.v
-        save()
-    end
-    imgui.PopItemWidth()
+    TaxiHelperUi.numericControl('max_distance', TaxiHelperUi.distanceInput, '##th_max_dist', 100, 20000, 100, 150)
 
     imgui.EndChild()
 end
@@ -1816,13 +2011,13 @@ local function calendar_month_shift(delta)
 end
 local function draw_calendar()
     imgui.TextColored(ACCENT, u8'КАЛЕНДАРЬ ЗАРАБОТКА')
-    if imgui.SmallButton('<##prev_month') then calendar_month_shift(-1) end
+    if TaxiHelperUi.actionButton('<##prev_month', 30, 26) then calendar_month_shift(-1) end
     imgui.SameLine()
     imgui.Text(string.format('%02d.%04d', calendar_month, calendar_year))
     imgui.SameLine()
-    if imgui.SmallButton('>##next_month') then calendar_month_shift(1) end
+    if TaxiHelperUi.actionButton('>##next_month', 30, 26) then calendar_month_shift(1) end
     imgui.SameLine()
-    if imgui.SmallButton(u8'Сегодня##cal_today') then
+    if TaxiHelperUi.actionButton(u8'Сегодня##cal_today', 86, 26) then
         local t = os.date('*t'); calendar_month=t.month; calendar_year=t.year
         calendar_selected = today()
     end
@@ -1845,11 +2040,10 @@ local function draw_calendar()
         local date = string.format('%04d-%02d-%02d', calendar_year,calendar_month,day)
         local entry = history[date]
         local label = string.format('%02d',day) .. '##cal_' .. date
-        if entry and (tonumber(entry.money) or 0)>0 then
-            imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0.10,0.35,0.17,0.9))
+        local has_money = entry and (tonumber(entry.money) or 0) > 0
+        if TaxiHelperUi.actionButton(label, 38, 25, calendar_selected == date, has_money) then
+            calendar_selected = date
         end
-        if imgui.Button(label,imgui.ImVec2(38,23)) then calendar_selected=date end
-        if entry and (tonumber(entry.money) or 0)>0 then imgui.PopStyleColor() end
     end
     if calendar_selected then
         local r = history[calendar_selected]
@@ -1884,9 +2078,9 @@ local function draw_events()
 end
 
 local function draw_logs()
-    if imgui.Button(u8'История по дням##hist_days') then history_view=1 end
-    imgui.SameLine()
-    if imgui.Button(u8'Календарь##hist_calendar') then history_view=2 end
+    if TaxiHelperUi.actionButton(u8'История по дням##hist_days', 170, 30, history_view == 1) then history_view=1 end
+    imgui.SameLine(nil, 7)
+    if TaxiHelperUi.actionButton(u8'Календарь##hist_calendar', 126, 30, history_view == 2) then history_view=2 end
     imgui.Separator()
     if history_view == 2 then
         draw_calendar()
@@ -2233,7 +2427,8 @@ function imgui.OnDrawFrame()
         notification_icon_alpha = alpha
 
 
-        imgui.SetNextWindowSize(imgui.ImVec2(395, 174), imgui.Cond.Always)
+        local goal_enabled = (tonumber(cfg.ui.goal_amount) or 0) > 0
+        imgui.SetNextWindowSize(imgui.ImVec2(395, goal_enabled and 251 or 174), imgui.Cond.Always)
         imgui.SetNextWindowPos(
             imgui.ImVec2(io.DisplaySize.x * 0.5, io.DisplaySize.y * 0.12 + (1.0 - alpha) * 12),
             imgui.Cond.Always,
@@ -2294,33 +2489,70 @@ function imgui.OnDrawFrame()
 
         imgui.PopFont()
 
-        imgui.Spacing()
-        imgui.Spacing()
+        local goal_amount = math.max(0, tonumber(cfg.ui.goal_amount) or 0)
+        if goal_amount > 0 then
+            local earned = math.max(0, tonumber(notification.day_money) or 0)
+            local previous_earned = math.max(0, earned - (tonumber(notification.ride_money) or 0))
+            local start_ratio = previous_earned / goal_amount
+            local end_ratio = earned / goal_amount
+            local anim_t = math.max(0, math.min(elapsed / 1450, 1))
+            local eased = anim_t * anim_t * (3 - 2 * anim_t)
+            local animated_ratio = start_ratio + (end_ratio - start_ratio) * eased
+            local pct = math.max(0, math.floor(animated_ratio * 100 + 0.5))
+            local fill_ratio = math.max(0, math.min(animated_ratio, 1))
+            local remaining = math.max(0, goal_amount - earned)
 
-        local progress = 1.0 - (elapsed / NOTIFY_DURATION)
-        progress = math.max(0, math.min(1, progress))
+            -- The goal has its own distinct card, rather than two identical green bars.
+            imgui.Spacing()
+            local p = imgui.GetCursorScreenPos()
+            local w = imgui.GetContentRegionAvail().x
+            local h = 73
+            local dl = imgui.GetWindowDrawList()
+            dl:AddRectFilled(imgui.ImVec2(p.x, p.y),
+                imgui.ImVec2(p.x + w, p.y + h), fade_draw_color(0xB51A2320), 7)
 
+            local title = remaining == 0 and u8'Цель достигнута!' or (u8'До цели: $' .. format_money(remaining))
+            local pct_text = tostring(pct) .. '%'
+            dl:AddText(imgui.ImVec2(p.x + 12, p.y + 9),
+                fade_draw_color(remaining == 0 and 0xFF71F18D or 0xFFCED9D1), title)
+            local pct_w = imgui.CalcTextSize(pct_text).x
+            dl:AddText(imgui.ImVec2(p.x + w - pct_w - 12, p.y + 9),
+                fade_draw_color(0xFF6AF18B), pct_text)
+
+            local track_x, track_y = p.x + 12, p.y + 34
+            local track_w, track_h = w - 24, 6
+            dl:AddRectFilled(imgui.ImVec2(track_x, track_y),
+                imgui.ImVec2(track_x + track_w, track_y + track_h),
+                fade_draw_color(0xFF303A36), track_h / 2)
+            if fill_ratio > 0 then
+                dl:AddRectFilled(imgui.ImVec2(track_x, track_y),
+                    imgui.ImVec2(track_x + math.max(2, track_w * fill_ratio), track_y + track_h),
+                    fade_draw_color(0xFF40D76B), track_h / 2)
+            end
+
+            local goal_text = '$' .. format_money(earned) .. '  /  $' .. format_money(goal_amount)
+            local goal_text_w = imgui.CalcTextSize(goal_text).x
+            dl:AddText(imgui.ImVec2(p.x + (w - goal_text_w) / 2, p.y + 50),
+                fade_draw_color(0xFFC4CDC7), goal_text)
+            imgui.Dummy(imgui.ImVec2(0, h))
+        end
+
+        -- Muted countdown line: closer to the goal card, kept distinct from earnings.
+        if goal_amount <= 0 then imgui.Spacing() end
+        local timer_ratio = math.max(0, math.min(1, 1.0 - elapsed / NOTIFY_DURATION))
         local p = imgui.GetCursorScreenPos()
-        local bar_width = imgui.GetContentRegionAvail().x
-        local bar_height = 4
-
+        local timer_w = imgui.GetContentRegionAvail().x
+        local timer_h = 2
         local dl = imgui.GetWindowDrawList()
-
-        dl:AddRectFilled(
-            imgui.ImVec2(p.x, p.y), 
-            imgui.ImVec2(p.x + bar_width, p.y + bar_height), 
-            imgui.ImColor(255, 255, 255, 30 * text_alpha):GetU32(), 
-            bar_height / 2
-        )
-
-        dl:AddRectFilled(
-            imgui.ImVec2(p.x, p.y), 
-            imgui.ImVec2(p.x + (bar_width * progress), p.y + bar_height), 
-            imgui.ImColor(66, 220, 82, 255 * text_alpha):GetU32(), 
-            bar_height / 2
-        )
-
-        imgui.Dummy(imgui.ImVec2(0, bar_height + 5))
+        dl:AddRectFilled(imgui.ImVec2(p.x, p.y),
+            imgui.ImVec2(p.x + timer_w, p.y + timer_h),
+            fade_draw_color(0x704B5A57), 1)
+        if timer_ratio > 0 then
+            dl:AddRectFilled(imgui.ImVec2(p.x, p.y),
+                imgui.ImVec2(p.x + timer_w * timer_ratio, p.y + timer_h),
+                fade_draw_color(0xD0A4B3AA), 1)
+        end
+        imgui.Dummy(imgui.ImVec2(0, timer_h + 2))
 
         imgui.End()
 
@@ -2338,6 +2570,7 @@ function imgui.OnDrawFrame()
         imgui.PushStyleVar(imgui.StyleVar.Alpha, math.max(0.05, menu_fade))
         draw_menu()
         update_draw_dialog()
+        draw_goal_edit_dialog()
         imgui.PopStyleVar()
     end
 end
@@ -2365,7 +2598,10 @@ function main()
 
     sampRegisterChatCommand('thelper', function()
         menu_open.v = not menu_open.v
+        if not menu_open.v then goal_keyboard_editor = false end
     end)
+
+
 
 
     AHKMessage('Успешно загружен. Меню - /thelper')
@@ -2376,6 +2612,16 @@ function main()
     local last_order_poll = 0
 
     while true do
+        if goal_keyboard_editor and not menu_open.v then goal_keyboard_editor = false end
+        -- Save text edits if the player closes the menu or changes tabs mid-edit.
+        if not menu_open.v or menu_tab ~= 2 then
+            if TaxiHelperUi.numericDirty.max_distance then
+                TaxiHelperUi.distanceInput.v = format_money(cfg.ui.max_distance or 3500)
+                TaxiHelperUi.numericDirty.max_distance = false
+                TaxiHelperUi.numericEditActive.max_distance = false
+                save()
+            end
+        end
         imgui.Process = gta and (show.v or notification.active or menu_open.v)
         if startup_update_notice_pending then
             if update_state == 'available' then
