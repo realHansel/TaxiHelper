@@ -1,5 +1,5 @@
-script_name('Taxi Helper 2.3')
-script_version('2.3')
+script_name('Taxi Helper 2.3.1')
+script_version('2.3.1')
 
 require 'lib.moonloader'
 local sampev = require 'samp.events'
@@ -62,6 +62,10 @@ local L = {
     sec_orders   = u8'ЛОВЛЯ ЗАКАЗОВ',
     order_dist   = u8'Макс. дистанция (м)',
     bot_only     = u8'Принимать заказы только от ботов',
+    auto_catch   = u8'Автоматически ловить заказы',
+    catch_mode   = u8'Режим ловли',
+    mode_instant = u8'Моментальный',
+    mode_nearest = u8'Ближайший заказ',
     sec_goal     = u8'ЦЕЛЬ ЗАРАБОТКА',
     goal_amount  = u8'Цель на день ($)',
     goal_off     = u8'0 - отключить отображение цели',
@@ -173,7 +177,7 @@ local defaults = {
     day     = { date = '', rides = 0, money = 0, worked = 0, boxes = 0, coins = 0, tips = 0, tips_cash = 0 },
     ui      = { notify = 1, s_rides = 1, s_money = 1, s_avg = 1, s_time = 1,
                 d_money = 1, d_worked = 1, d_rides = 1, d_boxes = 1, d_coins = 1, d_tips = 1, d_avg = 0,
-                max_distance = 3500, bot_only = 0, goal_amount = 0 }
+                max_distance = 3500, bot_only = 0, auto_catch = 1, catch_mode = 2, goal_amount = 0 }
 }
 
 local cfg = inicfg.load(defaults, config_path)
@@ -181,7 +185,7 @@ local cfg = inicfg.load(defaults, config_path)
 local UI_DEFAULTS = {
     notify = 1, s_rides = 1, s_money = 1, s_avg = 1, s_time = 1,
     d_money = 1, d_worked = 1, d_rides = 1, d_boxes = 1, d_coins = 1, d_tips = 1, d_avg = 0,
-    max_distance = 3500, bot_only = 0, goal_amount = 0
+    max_distance = 3500, bot_only = 0, auto_catch = 1, catch_mode = 2, goal_amount = 0
 }
 
 if type(cfg.ui) ~= 'table' then cfg.ui = {} end
@@ -190,7 +194,7 @@ local uib = {}
 for key, def in pairs(UI_DEFAULTS) do
     local v = tonumber(cfg.ui[key])
     if v == nil then v = def end
-    if key == 'max_distance' or key == 'goal_amount' then
+    if key == 'max_distance' or key == 'goal_amount' or key == 'catch_mode' then
         uib[key] = imgui.ImInt(v)
     else
         uib[key] = imgui.ImBool(v == 1)
@@ -678,17 +682,21 @@ function setActive(state, reason)
     order_collect_start, order_collect_until = 0, 0
     local suffix = reason and (' (' .. reason .. ')') or ''
     if active then
-        AHKMessage('Ловля ON - ожидание заказов' .. suffix, 0x00FF00)
+        if uib.auto_catch.v then
+            AHKMessage('Ловля ON - ожидание заказов' .. suffix, 0x00FF00)
+        else
+            AHKMessage('Автоловля отключена в настройках' .. suffix, 0xFFAA00)
+        end
     else
         AHKMessage('Ловля OFF' .. suffix, 0xFF0000)
     end
 end
 
 function pickBest()
-    if not active or busy or catching then return end
+    if not active or not uib.auto_catch.v or busy or catching then return end
 
     local current = game_ms()
-    if current < order_collect_until then return end
+    if uib.catch_mode.v == 2 and current < order_collect_until then return end
     order_collect_start, order_collect_until = 0, 0
     local bestId, bestDist
     for oid, dist in pairs(orders) do
@@ -790,8 +798,11 @@ local function onCef(str)
         if uib.bot_only.v and seen == 0 then
             print('[TaxiHelper][BotFilter] initializeOrders received, but no valid orders were parsed')
         end
-        if eligible_seen and not busy and not catching then
-            if order_collect_until == 0 or current >= order_collect_until then
+        if eligible_seen and uib.auto_catch.v and not busy and not catching then
+            if uib.catch_mode.v == 1 then
+                order_collect_start, order_collect_until = 0, 0
+                pickBest()
+            elseif order_collect_until == 0 or current >= order_collect_until then
                 order_collect_start = current
                 order_collect_until = current + ORDER_COLLECT_MS
             end
@@ -939,7 +950,7 @@ function sampev.onShowDialog(id, style, title, b1, b2, text)
         return
     end
 
-    if not active then return end
+    if not active or not uib.auto_catch.v then return end
 
     if id == DIALOG_CONFIRM and text:find('Вы хотите принять этот вызов', 1, true) then
         sampSendDialogResponse(id, 1, -1, '')
@@ -1989,10 +2000,46 @@ local function draw_settings()
     end
 
     menu_section(L.sec_orders)
+    if ui_toggle('auto_catch', L.auto_catch, uib.auto_catch) then
+        ui_commit('auto_catch')
+        if uib.auto_catch.v then
+            order_collect_start, order_collect_until = 0, 0
+            pickBest()
+        end
+    end
     if ui_toggle('bot_only', L.bot_only, uib.bot_only) then
         ui_commit('bot_only')
         if not busy and not catching then pickBest() end
     end
+    imgui.Spacing()
+    icon_text('orders', L.catch_mode)
+    local instant = uib.catch_mode.v == 1
+    if TaxiHelperUi.actionButton(L.mode_instant .. '##th_catch_instant', 145, 30, instant) then
+        uib.catch_mode.v = 1
+        cfg.ui.catch_mode = 1
+        order_collect_start, order_collect_until = 0, 0
+        save()
+        pickBest()
+    end
+    if imgui.IsItemHovered() then
+        imgui.BeginTooltip()
+        imgui.Text(u8'Сразу принимает первый подходящий заказ без задержки.')
+        imgui.EndTooltip()
+    end
+    imgui.SameLine(nil, 8)
+    if TaxiHelperUi.actionButton(L.mode_nearest .. '##th_catch_nearest', 177, 30, not instant) then
+        uib.catch_mode.v = 2
+        cfg.ui.catch_mode = 2
+        order_collect_start, order_collect_until = 0, 0
+        save()
+        pickBest()
+    end
+    if imgui.IsItemHovered() then
+        imgui.BeginTooltip()
+        imgui.Text(u8'Ждёт 50 мс и выбирает ближайший заказ. Если не удалось - пробует следующий.')
+        imgui.EndTooltip()
+    end
+    imgui.Spacing()
     icon_text('distance', L.order_dist)
     imgui.SameLine(200)
     TaxiHelperUi.numericControl('max_distance', TaxiHelperUi.distanceInput, '##th_max_dist', 100, 20000, 100, 150)
