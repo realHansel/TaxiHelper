@@ -30,7 +30,7 @@ local L = {
     session_sum  = u8'Заработано за сессию:',
     day_sum      = u8'Заработано сегодня:',
     avg          = u8'Средний чек:',
-    menu_title   = 'Taxi Helper  v2.3',
+    menu_title   = 'Taxi Helper  v2.3.1',
     menu_sub     = u8'Статистика поездок и настройки',
     tab_main     = u8'Главная',
     tab_settings = u8'Настройки',
@@ -996,7 +996,7 @@ function AHKMessage(text, color)
 end
 
 
-local UPDATE_CURRENT_VERSION = '2.3'
+local UPDATE_CURRENT_VERSION = '2.3.1'
 local UPDATE_INFO_URL = 'https://raw.githubusercontent.com/realHansel/TaxiHelper/main/info.upd'
 local UPDATE_SCRIPT_URL = 'https://raw.githubusercontent.com/realHansel/TaxiHelper/main/TaxiHelper.lua'
 local UPDATE_DLSTATUS = require('moonloader').download_status
