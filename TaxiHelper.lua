@@ -1,5 +1,5 @@
-script_name('Taxi Helper 2.3.1')
-script_version('2.3.1')
+script_name('Taxi Helper 2.4')
+script_version('2.4')
 
 require 'lib.moonloader'
 local sampev = require 'samp.events'
@@ -10,6 +10,25 @@ encoding.default = 'CP1251'
 u8 = encoding.UTF8
 
 local config_path = 'TaxiHelper.ini'
+
+local function _fix_base(path)
+    if not path then return '' end
+    return (path:gsub('[\\/]moonloader[\\/]moonloader', '\\moonloader'))
+end
+
+local _cached_base = nil
+local function script_base()
+    if _cached_base then return _cached_base end
+    local base
+    local ok, s = pcall(thisScript)
+    if ok and s and type(s.dir) == 'string' and s.dir ~= '' then
+        base = s.dir
+    else
+        base = getWorkingDirectory() or ''
+    end
+    _cached_base = _fix_base(base)
+    return _cached_base
+end
 
 local L = {
     window       = u8'Taxi Helper',
@@ -30,11 +49,6 @@ local L = {
     session_sum  = u8'Заработано за сессию:',
     day_sum      = u8'Заработано сегодня:',
     avg          = u8'Средний чек:',
-    menu_title   = 'Taxi Helper  v2.3.1',
-    menu_sub     = u8'Статистика поездок и настройки',
-    tab_main     = u8'Главная',
-    tab_settings = u8'Настройки',
-    tab_logs     = u8'История',
     sec_windows  = u8'ОКНА',
     opt_stats    = u8'Окно статистики на экране',
     opt_notify   = u8'Всплывающие уведомления',
@@ -57,19 +71,26 @@ local L = {
     col_avg      = u8'Средний чек',
     today        = u8'сегодня',
     no_data      = u8'Данных пока нет. Статистика появится после первого рейса.',
-    reset_day_btn = u8'Сбросить статистику за день',
-    reset_confirm = u8'Нажми ещё раз для подтверждения',
     sec_orders   = u8'ЛОВЛЯ ЗАКАЗОВ',
     order_dist   = u8'Макс. дистанция (м)',
     bot_only     = u8'Принимать заказы только от ботов',
     auto_catch   = u8'Автоматически ловить заказы',
     catch_mode   = u8'Режим ловли',
+    sound_on     = u8'Звук при поимке заказа',
+    sound_kind   = u8'Мелодия',
+    sound_volume = u8'Громкость',
+    sound_test   = u8'Проверить звук',
+    snd_1        = u8'Такси-приложение',
+    snd_2        = u8'Колокольчик',
+    snd_3        = u8'Двойной сигнал',
+    snd_4        = u8'Арпеджио',
+    snd_5        = u8'Свой файл',
+    snd_6        = u8'Яндекс-такси',
     mode_instant = u8'Моментальный',
     mode_nearest = u8'Ближайший заказ',
     sec_goal     = u8'ЦЕЛЬ ЗАРАБОТКА',
     goal_amount  = u8'Цель на день ($)',
     goal_off     = u8'0 - отключить отображение цели',
-    goal_caption = u8'ЦЕЛЬ НА ДЕНЬ',
 }
 
 local DOLLAR_COLOR     = imgui.ImVec4(0.35, 1.0, 0.35, 1.0)
@@ -78,7 +99,6 @@ local TAXI_YELLOW      = imgui.ImVec4(0.26, 0.98, 0.26, 1.0)
 local TAXI_WHITE       = imgui.ImVec4(1.0, 1.0, 1.0, 1.0)
 local WINDOW_BG        = imgui.ImVec4(0.045, 0.055, 0.075, 0.70)
 local WINDOW_BORDER    = imgui.ImVec4(0.26, 0.98, 0.26, 0.35)
-local PANEL_BG         = imgui.ImVec4(0.075, 0.085, 0.11, 0.98)
 
 local SEP_SESSION      = {255, 200, 60}
 local SEP_DAY          = {100, 200, 255}
@@ -94,11 +114,18 @@ local busy         = false
 local catching     = false
 local catchStart   = 0
 
-local orders     = {}
-local order_is_bot = {}
+local order_notify = {
+    pickup_seen   = false,
+    awaiting_dest = false,
+    dest_shown    = false,
+}
+
+local orders        = {}
+local order_is_bot  = {}
 local order_seen_at = {}
 local order_retry_at = {}
-local lastPicked = nil
+local lastPicked    = nil
+local lastPickedDist = 0
 
 local AUTO          = true
 local NEAREST       = true
@@ -158,6 +185,7 @@ addEventHandler("onWindowMessage", function(msg, wparam)
                 return
             elseif wparam == 0x1B then
                 goal_keyboard_cancel = true
+                esc_swallowed = true
                 consumeWindowMessage(true, true)
                 return
             end
@@ -167,6 +195,10 @@ addEventHandler("onWindowMessage", function(msg, wparam)
     if msg == 0x100 and wparam == 0x1B and menu_open.v then
         menu_open.v = false
         imgui.ShowCursor = false
+        esc_swallowed = true
+        consumeWindowMessage(true, false)
+    elseif msg == 0x101 and wparam == 0x1B and esc_swallowed then
+        esc_swallowed = false
         consumeWindowMessage(true, false)
     end
 end)
@@ -175,17 +207,21 @@ local defaults = {
     window  = { x = 100, y = 100, show = true },
     session = { rides = 0, money = 0, best_ride = 0, unfinished = 0 },
     day     = { date = '', rides = 0, money = 0, worked = 0, boxes = 0, coins = 0, tips = 0, tips_cash = 0 },
-    ui      = { notify = 1, s_rides = 1, s_money = 1, s_avg = 1, s_time = 1,
+    ui      = { notify = 1,
+                s_rides = 1, s_money = 1, s_avg = 1, s_time = 1,
                 d_money = 1, d_worked = 1, d_rides = 1, d_boxes = 1, d_coins = 1, d_tips = 1, d_avg = 0,
-                max_distance = 3500, bot_only = 0, auto_catch = 1, catch_mode = 2, goal_amount = 0 }
+                max_distance = 3500, bot_only = 0, auto_catch = 1, catch_mode = 2, goal_amount = 0,
+                sound_on = 1, sound_kind = 6, sound_volume = 70 }
 }
 
 local cfg = inicfg.load(defaults, config_path)
 
 local UI_DEFAULTS = {
-    notify = 1, s_rides = 1, s_money = 1, s_avg = 1, s_time = 1,
+    notify = 1,
+    s_rides = 1, s_money = 1, s_avg = 1, s_time = 1,
     d_money = 1, d_worked = 1, d_rides = 1, d_boxes = 1, d_coins = 1, d_tips = 1, d_avg = 0,
-    max_distance = 3500, bot_only = 0, auto_catch = 1, catch_mode = 2, goal_amount = 0
+    max_distance = 3500, bot_only = 0, auto_catch = 1, catch_mode = 2, goal_amount = 0,
+    sound_on = 1, sound_kind = 6, sound_volume = 70
 }
 
 if type(cfg.ui) ~= 'table' then cfg.ui = {} end
@@ -194,12 +230,261 @@ local uib = {}
 for key, def in pairs(UI_DEFAULTS) do
     local v = tonumber(cfg.ui[key])
     if v == nil then v = def end
-    if key == 'max_distance' or key == 'goal_amount' or key == 'catch_mode' then
+    if key == 'max_distance' or key == 'goal_amount' or key == 'catch_mode' or key == 'sound_kind' or key == 'sound_volume' then
         uib[key] = imgui.ImInt(v)
     else
         uib[key] = imgui.ImBool(v == 1)
     end
 end
+
+TaxiHelperSound = { ring = {}, RATE = 22050 }
+
+function TaxiHelperSound.dir()
+    return getWorkingDirectory() .. '\\resource\\TaxiHelper'
+end
+
+function TaxiHelperSound.ensure_dir()
+    local d = TaxiHelperSound.dir()
+    if not doesDirectoryExist(d) then
+        pcall(createDirectory, getWorkingDirectory() .. '\\resource')
+        pcall(createDirectory, d)
+    end
+    return doesDirectoryExist(d)
+end
+
+function TaxiHelperSound.file_size(path)
+    local f = io.open(path, 'rb')
+    if not f then return 0 end
+    local size = f:seek('end') or 0
+    f:close()
+    return size
+end
+
+function TaxiHelperSound.synth(kind)
+    local bit = require 'bit'
+    local rate = TaxiHelperSound.RATE
+    local lengths = { 2.4, 2.2, 1.4, 2.2 }
+    local n = math.floor(lengths[kind] * rate)
+    local buf = {}
+    for i = 1, n do buf[i] = 0 end
+
+    local function add(freq, start, dur, amp, decay, partials)
+        local s0 = math.floor(start * rate)
+        local cnt = math.floor(dur * rate)
+        for i = 0, cnt - 1 do
+            local idx = s0 + i + 1
+            if idx > n then break end
+            local t = i / rate
+            local env = math.exp(-t / decay) * math.min(1, t / 0.004) * math.max(0, math.min(1, (dur - t) / 0.03))
+            local v = 0
+            for _, p in ipairs(partials) do
+                v = v + p[2] * math.sin(2 * math.pi * freq * p[1] * t)
+            end
+            buf[idx] = buf[idx] + v * env * amp
+        end
+    end
+
+    local warm = { { 1, 1 }, { 2, 0.28 }, { 3, 0.09 } }
+    local bell = { { 1, 1 }, { 2.76, 0.5 }, { 5.4, 0.22 }, { 8.93, 0.1 } }
+    local soft = { { 1, 1 }, { 2, 0.12 } }
+
+    if kind == 1 then
+        add(659.25, 0.00, 1.1, 0.55, 0.30, warm)
+        add(880.00, 0.24, 1.6, 0.60, 0.42, warm)
+    elseif kind == 2 then
+        add(1318.5, 0.00, 1.6, 0.60, 0.50, bell)
+        add(1318.5, 0.42, 1.4, 0.32, 0.45, bell)
+    elseif kind == 3 then
+        add(987.77, 0.00, 0.14, 0.55, 0.30, soft)
+        add(987.77, 0.22, 0.14, 0.55, 0.30, soft)
+    else
+        add(523.25, 0.00, 0.9, 0.45, 0.28, warm)
+        add(659.25, 0.12, 0.9, 0.45, 0.28, warm)
+        add(783.99, 0.24, 0.9, 0.45, 0.28, warm)
+        add(1046.5, 0.36, 1.3, 0.50, 0.38, warm)
+    end
+
+    local d1, d2 = math.floor(0.17 * rate), math.floor(0.34 * rate)
+    local out = {}
+    local peak = 0
+    for i = 1, n do
+        local v = buf[i]
+        if i > d1 then v = v + 0.30 * buf[i - d1] end
+        if i > d2 then v = v + 0.15 * buf[i - d2] end
+        out[i] = v
+        if math.abs(v) > peak then peak = math.abs(v) end
+    end
+    local scale = peak > 0 and 0.82 / peak or 1
+
+    local function u16(v) return string.char(bit.band(v, 255), bit.band(bit.rshift(v, 8), 255)) end
+    local function u32(v) return u16(bit.band(v, 65535)) .. u16(bit.band(bit.rshift(v, 16), 65535)) end
+
+    local data = {}
+    for i = 1, n do
+        local v = math.floor(out[i] * scale * 32767 + 0.5)
+        if v < 0 then v = v + 65536 end
+        data[i] = u16(v)
+    end
+    local pcm = table.concat(data)
+    return 'RIFF' .. u32(36 + #pcm) .. 'WAVEfmt ' .. u32(16) .. u16(1) .. u16(1)
+        .. u32(rate) .. u32(rate * 2) .. u16(2) .. u16(16) .. 'data' .. u32(#pcm) .. pcm
+end
+
+TaxiHelperSound.YANDEX_URL = 'https://zvukoviku.ru/sounds/1587312926_dadsdasasdas.mp3'
+TaxiHelperSound.YANDEX_DL  = false
+TaxiHelperSound._ffi       = nil
+TaxiHelperSound._winmm     = nil
+
+function TaxiHelperSound.valid_media(path)
+    if not path or not doesFileExist(path) then return false end
+    if TaxiHelperSound.file_size(path) < 20000 then return false end
+    local f = io.open(path, 'rb')
+    if not f then return false end
+    local h = f:read(4) or ''
+    f:close()
+    return h:sub(1, 3) == 'ID3' or h:sub(1, 3) == 'RIFF' or h:sub(1, 4) == 'OggS' or h:byte(1) == 0xFF
+end
+
+-- Автозагрузка звука "Яндекс-такси" (аналогично fa_ensure_font)
+function TaxiHelperSound.ensure_yandex()
+    if TaxiHelperSound.YANDEX_DL then return end
+    if not TaxiHelperSound.ensure_dir() then return end
+    local p = TaxiHelperSound.dir() .. '\\yandex.mp3'
+    if TaxiHelperSound.valid_media(p) then return end
+    if type(downloadUrlToFile) ~= 'function' then return end
+    local tmp = p .. '.download'
+    os.remove(tmp)
+    TaxiHelperSound.YANDEX_DL = true
+    pcall(function()
+        downloadUrlToFile(TaxiHelperSound.YANDEX_URL, tmp, function(id, status)
+            local ds = require('moonloader').download_status
+            if status == ds.STATUS_ENDDOWNLOADDATA then
+                TaxiHelperSound.YANDEX_DL = false
+                if TaxiHelperSound.valid_media(tmp) then
+                    os.remove(p)
+                    if os.rename(tmp, p) then
+                        AHKMessage('Звук «Яндекс-такси» загружен.')
+                    else
+                        os.remove(tmp)
+                    end
+                else
+                    os.remove(tmp)
+                    AHKMessage('Звук «Яндекс-такси»: скачан неверный файл. Положите yandex.mp3 в moonloader\\resource\\TaxiHelper вручную.', 0xFFAA00)
+                end
+            elseif status == ds.STATUS_ERROR then
+                TaxiHelperSound.YANDEX_DL = false
+                os.remove(tmp)
+                AHKMessage('Не удалось скачать звук «Яндекс-такси». Скачайте вручную: ' .. TaxiHelperSound.YANDEX_URL, 0xFFAA00)
+            end
+        end)
+    end)
+end
+
+-- === winmm-проигрыватель: работает и когда игра свёрнута ===
+function TaxiHelperSound.winmm()
+    if TaxiHelperSound._winmm then return TaxiHelperSound._winmm end
+    local ok, ffi = pcall(require, 'ffi')
+    if not ok then return nil end
+    local okc = pcall(ffi.cdef, [[
+        uint32_t mciSendStringW(const uint16_t* command, uint16_t* ret, int32_t len, void* hwnd);
+        int32_t  PlaySoundW(const uint16_t* name, void* hmod, uint32_t flags);
+    ]])
+    if not okc then return nil end
+    local okl, winmm = pcall(ffi.load, 'winmm')
+    if not okl then return nil end
+    TaxiHelperSound._ffi   = ffi
+    TaxiHelperSound._winmm = winmm
+    return winmm
+end
+
+function TaxiHelperSound.to_wide(s)
+    local ffi = TaxiHelperSound._ffi
+    local buf = ffi.new('uint16_t[?]', #s + 1)
+    for i = 1, #s do buf[i - 1] = s:byte(i) end
+    return buf
+end
+
+function TaxiHelperSound.play_winmm(path, volume)
+    local winmm = TaxiHelperSound.winmm()
+    if not winmm then return false, 'winmm' end
+    local w = TaxiHelperSound.to_wide
+    winmm.mciSendStringW(w('close TaxiHelperSnd'), nil, 0, nil)
+    local ext = (path:match('%.(%w+)$') or ''):lower()
+    local order = (ext == 'wav') and { 'waveaudio', 'mpegvideo' } or { 'mpegvideo', 'waveaudio' }
+    local opened = false
+    for _, t in ipairs(order) do
+        local cmd = ('open "%s" type %s alias TaxiHelperSnd'):format(path, t)
+        if winmm.mciSendStringW(w(cmd), nil, 0, nil) == 0 then opened = true break end
+    end
+    if opened then
+        local vol = math.max(0, math.min(100, tonumber(volume) or 70)) * 10 -- 0..1000
+        winmm.mciSendStringW(w(('setaudio TaxiHelperSnd volume to %d'):format(vol)), nil, 0, nil)
+        winmm.mciSendStringW(w('play TaxiHelperSnd from 0'), nil, 0, nil)
+        return true
+    end
+    if ext == 'wav' then -- последний fallback: PlaySoundW
+        if winmm.PlaySoundW(w(path), nil, 0x1 + 0x20000 + 0x10) ~= 0 then return true end -- SND_ASYNC|SND_FILENAME|SND_NOSTOP
+    end
+    return false, 'open'
+end
+
+function TaxiHelperSound.file_for(kind)
+    if not TaxiHelperSound.ensure_dir() then return nil, 'dir' end
+    if kind == 5 then
+        for _, ext in ipairs({ 'mp3', 'wav', 'ogg' }) do
+            local p = TaxiHelperSound.dir() .. '\\custom.' .. ext
+            if doesFileExist(p) then return p end
+        end
+        return nil, 'custom'
+    end
+    if kind == 6 then
+        local p = TaxiHelperSound.dir() .. '\\yandex.mp3'
+        if TaxiHelperSound.valid_media(p) then return p end
+        TaxiHelperSound.ensure_yandex()
+        return nil, 'yandex'
+    end
+    local p = TaxiHelperSound.dir() .. '\\order_' .. kind .. '.wav'
+    if TaxiHelperSound.file_size(p) < 4000 then
+        local ok, data = pcall(TaxiHelperSound.synth, kind)
+        if not ok or not data then return nil, 'synth' end
+        local f = io.open(p, 'wb')
+        if not f then return nil, 'write' end
+        f:write(data)
+        f:close()
+    end
+    return p
+end
+
+function TaxiHelperSound.play(kind)
+    local path, why = TaxiHelperSound.file_for(kind)
+    if not path then return false, why end
+    local volume = tonumber(uib.sound_volume.v) or 70
+    local ok = TaxiHelperSound.play_winmm(path, volume)
+    if ok then return true end
+    local ok2, stream = pcall(loadAudioStream, (path:gsub('\\', '/')))
+    if not ok2 or not stream then return false, 'stream' end
+    pcall(setAudioStreamVolume, stream, math.max(0, math.min(100, volume)))
+    pcall(setAudioStreamState, stream, 1)
+    local ring = TaxiHelperSound.ring
+    ring[#ring + 1] = stream
+    if #ring > 3 then table.remove(ring, 1) end
+    return true
+end
+
+function TaxiHelperSound.play_selected()
+    local ok, why = TaxiHelperSound.play(tonumber(uib.sound_kind.v) or 1)
+    if not ok then
+        if why == 'custom' then
+            AHKMessage('Звук: положи файл custom.mp3 (или .wav / .ogg) в moonloader\\resource\\TaxiHelper', 0xFFAA00)
+        elseif why == 'yandex' then
+            AHKMessage('Звук: «Яндекс-такси» ещё загружается или не скачался. Проверь moonloader\\resource\\TaxiHelper\\yandex.mp3', 0xFFAA00)
+        else
+            AHKMessage('Звук: не удалось подготовить или воспроизвести файл (' .. tostring(why) .. ')', 0xFF5555)
+        end
+    end
+    return ok
+end
+
 
 local waiting_payment       = false
 local payment_deadline      = 0
@@ -226,7 +511,7 @@ local notification = {
     started = 0,
     ride_money = 0,
     session_money = 0,
-    day_money = 0
+    day_money = 0,
 }
 
 local NOTIFY_DURATION = 7000
@@ -240,12 +525,11 @@ local function game_ms()
     return math.floor(os.clock() * 1000)
 end
 
-
 local event_log = {}
 local EVENT_LIMIT = 120
 local event_rev = 0
 local function event_file()
-    return getWorkingDirectory() .. '\\config\\TaxiHelper_events.json'
+    return script_base() .. '\\config\\TaxiHelper_events.json'
 end
 local function event_load()
     local f = io.open(event_file(), 'rb')
@@ -280,6 +564,22 @@ local function event_add(message)
     else os.remove(tmp) end
 end
 
+local function chat_distance(m)
+    m = math.max(0, tonumber(m) or 0)
+    if m >= 1000 then
+        return string.format('%.1f км', m / 1000)
+    end
+    return string.format('%d м', math.floor(m))
+end
+
+local function get_location(x, y)
+    x, y = tonumber(x) or 0, tonumber(y) or 0
+    if x >= 869 and x <= 2997 and y >= 596 and y <= 2993 then return 'Лас-Вентурас' end
+    if x >= 44 and x <= 2997 and y >= -2892 and y <= -768 then return 'Лос-Сантос' end
+    if x >= -2997 and x <= -1213 and y >= -1115 and y <= 1659 then return 'Сан-Фиерро' end
+    return 'Сельская местность'
+end
+
 local function show_ride_notification(money, force)
     if not force and not uib.notify.v then return end
     notification.active = true
@@ -290,6 +590,12 @@ local function show_ride_notification(money, force)
     notification.day_money = tonumber(cfg.day.money) or 0
 end
 
+local function reset_order_notify()
+    order_notify.pickup_seen   = false
+    order_notify.awaiting_dest = false
+    order_notify.dest_shown    = false
+end
+
 local function notification_alpha()
     if not notification.active then return 0 end
     local elapsed = math.max(0, game_ms() - notification.started)
@@ -298,8 +604,6 @@ local function notification_alpha()
         notification_show.v = false
         return 0
     end
-
-
     local function smoothstep(t)
         t = math.max(0, math.min(1, t))
         return t * t * (3 - 2 * t)
@@ -324,7 +628,7 @@ local history     = {}
 local history_rev = 0
 
 local function history_file()
-    return getWorkingDirectory() .. '\\config\\TaxiHelper_history.json'
+    return script_base() .. '\\config\\TaxiHelper_history.json'
 end
 
 local function read_history_json(path)
@@ -349,7 +653,6 @@ local function history_save()
     local written = f:write(data)
     local closed = f:close()
     if not written or not closed then os.remove(tmp); return false end
-
     if read_history_json(path) then
         local src, dst = io.open(path, 'rb'), io.open(backup, 'wb')
         if src and dst then
@@ -359,10 +662,8 @@ local function history_save()
         if src then src:close() end
         if dst then dst:close() end
     end
-
     os.remove(path)
     if os.rename(tmp, path) then return true end
-
     local src = io.open(tmp, 'rb')
     local dst = io.open(path, 'wb')
     if src and dst then
@@ -402,7 +703,6 @@ local function history_sync()
     end
     history[d] = r
     history_rev = history_rev + 1
-
     history_save()
 end
 
@@ -422,8 +722,6 @@ end
 local function check_new_day()
     local d = today()
     if cfg.day.date ~= d then
-
-
         if work_segment_start > 0 then
             local midnight = os.time({year=tonumber(d:sub(1,4)), month=tonumber(d:sub(6,7)), day=tonumber(d:sub(9,10)), hour=0, min=0, sec=0})
             local old_end = math.min(now(), midnight)
@@ -446,18 +744,14 @@ end
 
 local function add_ride(money)
     check_new_day()
-
     cfg.session.rides     = (tonumber(cfg.session.rides) or 0) + 1
     cfg.session.money     = (tonumber(cfg.session.money) or 0) + money
     cfg.session.best_ride = tonumber(cfg.session.best_ride) or 0
-
     if money > cfg.session.best_ride then
         cfg.session.best_ride = money
     end
-
     cfg.day.rides = (tonumber(cfg.day.rides) or 0) + 1
     cfg.day.money = (tonumber(cfg.day.money) or 0) + money
-
     save()
     event_add(string.format("Поездка завершена: $%s", tostring(math.floor(money))))
     show_ride_notification(money)
@@ -486,6 +780,7 @@ local function reset_session()
     session_elapsed        = 0
     last_unfinished_save   = 0
     pending_boxes          = 0
+    reset_order_notify()
     save()
 end
 
@@ -513,8 +808,6 @@ TaxiHelperUi.distanceInput = imgui.ImBuffer(32)
 TaxiHelperUi.distanceInput.v = format_money(cfg.ui.max_distance or 3500)
 TaxiHelperUi.numericEditActive = { goal_amount = false, max_distance = false }
 TaxiHelperUi.numericDirty = { goal_amount = false, max_distance = false }
--- Keyboard events for the goal editor are handled independently of ImGui text focus.
--- The editor remains functional even when a ride notification steals GUI focus.
 
 function TaxiHelperUi.parseNumber(value)
     local digits = tostring(value or ''):gsub('[^%d]', '')
@@ -552,11 +845,9 @@ local function checkered_header(text)
         chars = utf8_chars(text)
         header_cache[text] = chars
     end
-
     local win_w  = imgui.GetWindowWidth()
     local text_w = imgui.CalcTextSize(text).x
     imgui.SetCursorPosX((win_w - text_w) / 2)
-
     for i, ch in ipairs(chars) do
         if ch == ' ' then
             imgui.Text(' ')
@@ -651,14 +942,12 @@ local function handle_informer(payload)
     if type(decodeJson) ~= 'function' then return end
     local ok, data = pcall(decodeJson, payload)
     if not ok or type(data) ~= 'table' then return end
-
     for _, info in ipairs(data) do
         if type(info) == 'table' and type(info.name) == 'string' then
             local tag  = tostring(info.tag or '')
             local gain = tonumber(tag:match('^%+(%d+)'))
             local kind = classify_reward(info)
             local amount, is_cash = gain, false
-
             if kind and amount and amount > 0 then
                 local key = tostring(kind) .. ':' .. tostring(info.imageId or '') .. ':' ..
                             tostring(info.id or '') .. ':' .. tostring(tag) .. ':' .. tostring(amount)
@@ -673,13 +962,48 @@ local function handle_informer(payload)
     end
 end
 
+-- === Pickup > destination детект (без плашек, только чат) ===
+function sampev.onSetRaceCheckpoint(checkpointType, position, nextPosition, radius)
+    if catching and not busy then
+        order_notify.pickup_seen = true
+        return
+    end
+    if busy then
+        if not order_notify.pickup_seen then
+            order_notify.pickup_seen = true
+            return
+        end
+        if order_notify.awaiting_dest then
+            order_notify.awaiting_dest = false
+            order_notify.dest_shown = true
+            local loc = get_location(position.x, position.y)
+            local px, py = 0, 0
+            if playerPed then
+                local ok, x, y = pcall(getCharCoordinates, playerPed)
+                if ok and x and y then px, py = x, y end
+            end
+            local dx, dy = position.x - px, position.y - py
+            local dist = math.sqrt(dx * dx + dy * dy)
+            AHKMessage(('Клиент в машине > %s, ехать %s'):format(loc, chat_distance(dist)), 0x00FFFF)
+        end
+    end
+end
+
+function sampev.onDisableRaceCheckpoint()
+    if busy and not order_notify.dest_shown then
+        order_notify.awaiting_dest = true
+    end
+end
+
 function setActive(state, reason)
     if active == state then return end
     active = state
     busy, catching = false, false
     orders, lastPicked = {}, nil
+    lastPickedDist = 0
     order_is_bot, order_seen_at, order_retry_at = {}, {}, {}
     order_collect_start, order_collect_until = 0, 0
+    reset_order_notify()
     local suffix = reason and (' (' .. reason .. ')') or ''
     if active then
         if uib.auto_catch.v then
@@ -694,7 +1018,6 @@ end
 
 function pickBest()
     if not active or not uib.auto_catch.v or busy or catching then return end
-
     local current = game_ms()
     if uib.catch_mode.v == 2 and current < order_collect_until then return end
     order_collect_start, order_collect_until = 0, 0
@@ -714,11 +1037,12 @@ function pickBest()
             end
         end
     end
-
     if bestId then
         lastPicked = bestId
+        lastPickedDist = bestDist
         catching = true
         catchStart = current
+        reset_order_notify()
         sendcef('pickOrderWorker|' .. bestId)
         AHKMessage(('Ловлю #%d (%d м)'):format(bestId, bestDist), 0xFFFF00)
     end
@@ -726,17 +1050,14 @@ end
 
 local function onCef(str)
     if not active then return end
-
     if str:find('event.arizonaDriver.initializeClearOrders', 1, true) then
         return
     end
-
     if str:find('event.arizonaDriver.initializeOrders', 1, true) then
         local max_dist = tonumber(uib.max_distance.v) or 3500
         local current = game_ms()
         local seen = 0
         local eligible_seen = false
-
         local function register_order(obj)
             if type(obj) ~= 'table' then return end
             local oid = tonumber(obj.id)
@@ -752,22 +1073,13 @@ local function onCef(str)
                 if not uib.bot_only.v or order_is_bot[oid] then
                     eligible_seen = true
                 end
-                if uib.bot_only.v then
-                    print(('[TaxiHelper][BotFilter] id=%d dist=%d rating=%s bot=%s busy=%s'):format(
-                        oid, dist, tostring(rating), tostring(order_is_bot[oid]), tostring(busy)))
-                end
             else
                 orders[oid] = nil
                 order_is_bot[oid] = nil
                 order_seen_at[oid] = nil
                 order_retry_at[oid] = nil
-                if uib.bot_only.v then
-                    print(('[TaxiHelper][BotFilter] skip id=%d dist=%s rating=%s active=%s limit=%d'):format(
-                        oid, tostring(dist), tostring(rating), tostring(obj.active), max_dist))
-                end
             end
         end
-
         local payload = str:match('`(.-)`')
         if payload and type(decodeJson) == 'function' then
             local ok, parsed = pcall(decodeJson, payload)
@@ -783,20 +1095,15 @@ local function onCef(str)
                 walk(parsed, 1)
             end
         end
-
         if seen == 0 then
             for obj in str:gmatch('{(.-)}') do
                 register_order({
                     id = obj:match('"id"%s*:%s*(%d+)'),
-                    name = obj:match('"name"%s*:%s*"([^"]*)"'),
                     rating = obj:match('"rating"%s*:%s*([%d%.]+)'),
                     distance = obj:match('"distance"%s*:%s*(%d+)'),
                     active = obj:match('"active"%s*:%s*(%d+)')
                 })
             end
-        end
-        if uib.bot_only.v and seen == 0 then
-            print('[TaxiHelper][BotFilter] initializeOrders received, but no valid orders were parsed')
         end
         if eligible_seen and uib.auto_catch.v and not busy and not catching then
             if uib.catch_mode.v == 1 then
@@ -809,11 +1116,12 @@ local function onCef(str)
         end
         return
     end
-
     if str:find('initializeDriverPage', 1, true) and str:find('"order"', 1, true) then
         if not busy then
             busy = true
             catching = false
+            if uib.sound_on.v then TaxiHelperSound.play_selected() end
+            local accepted_dist = lastPickedDist
             if lastPicked then
                 orders[lastPicked] = nil
                 order_is_bot[lastPicked] = nil
@@ -821,7 +1129,14 @@ local function onCef(str)
                 order_retry_at[lastPicked] = nil
             end
             lastPicked = nil
-            AHKMessage('Заказ пойман -> везём', 0x00FF00)
+            lastPickedDist = 0
+            order_notify.awaiting_dest = false
+            order_notify.dest_shown = false
+            if accepted_dist and accepted_dist > 0 then
+                AHKMessage(('Заказ пойман > ехать %s'):format(chat_distance(accepted_dist)), 0x00FFFF)
+            else
+                AHKMessage('Заказ пойман -> везём', 0x00FF00)
+            end
         end
         return
     end
@@ -829,7 +1144,6 @@ end
 
 local function process_cef(str)
     onCef(str)
-
     if str:find('damageInformer.initializeDamageInfo', 1, true) then
         local payload = str:match('`(.*)`')
         if payload then handle_informer(payload) end
@@ -845,7 +1159,6 @@ addEventHandler('onReceivePacket', function(id, bs)
         local enc = raknetBitStreamReadInt8(bs)
         local str = (enc ~= 0) and raknetBitStreamDecodeString(bs, len + enc)
                                 or raknetBitStreamReadString(bs, len)
-
         if str then
             local ok, err = pcall(process_cef, str)
             if not ok then print('[TaxiHelper] CEF: ' .. tostring(err)) end
@@ -862,9 +1175,29 @@ function sampev.onServerMessage(_, text)
             setActive(false, 'работа закончена')
         elseif clean:find('Вы прервали заказ', 1, true) then
             busy, catching = false, false
+            reset_order_notify()
             if lastPicked then orders[lastPicked] = nil end
             lastPicked = nil
+            lastPickedDist = 0
             AHKMessage('Заказ прерван -> ждём новый', 0xFFAA00)
+            pickBest()
+        elseif clean:find('Вы не смогли вовремя доставить', 1, true)
+            or clean:find('К сожалению заказ отменили', 1, true) then
+            local was_busy = busy or catching
+            busy, catching = false, false
+            reset_order_notify()
+            if lastPicked then
+                orders[lastPicked] = nil
+                order_is_bot[lastPicked] = nil
+                order_seen_at[lastPicked] = nil
+                order_retry_at[lastPicked] = nil
+            end
+            lastPicked = nil
+            lastPickedDist = 0
+            pending_boxes = 0
+            if was_busy then
+                AHKMessage('Время доставки истекло - ищем новый заказ', 0xFFAA00)
+            end
             pickBest()
         end
     end
@@ -882,6 +1215,7 @@ function sampev.onServerMessage(_, text)
         pending_deliveries     = {}
         waiting_payment        = false
         last_unfinished_save   = session_start
+        reset_order_notify()
         event_add("Смена началась")
         save()
     elseif clean:find('Вы закончили работу таксистом') then
@@ -897,6 +1231,7 @@ function sampev.onServerMessage(_, text)
         session_elapsed        = 0
         last_unfinished_save   = 0
         pending_boxes          = 0
+        reset_order_notify()
         event_add("Смена завершена")
         save()
     elseif clean:find('Ларцов за выполненный заказ') then
@@ -907,6 +1242,8 @@ function sampev.onServerMessage(_, text)
             busy = false
             catching = false
             lastPicked = nil
+            lastPickedDist = 0
+            reset_order_notify()
             AHKMessage('Доставил -> ждём заказ', 0x00FF00)
             pickBest()
         end
@@ -924,7 +1261,6 @@ function sampev.onServerMessage(_, text)
             local amount = tonumber((m:gsub('%s+', ''):gsub('%.', ''):gsub(',', '')))
             local t = now()
             local ms = game_ms()
-
             local duplicate = (last_payment_text == clean and ms - last_payment_ms < 350)
             if amount and amount >= 0 and not duplicate and #pending_deliveries > 0 then
                 table.remove(pending_deliveries, 1)
@@ -949,14 +1285,11 @@ function sampev.onShowDialog(id, style, title, b1, b2, text)
         setActive(true, 'начало работы')
         return
     end
-
     if not active or not uib.auto_catch.v then return end
-
     if id == DIALOG_CONFIRM and text:find('Вы хотите принять этот вызов', 1, true) then
         sampSendDialogResponse(id, 1, -1, '')
         return false
     end
-
     if text:find('Заказ уже принят или отменён', 1, true) then
         sampSendDialogResponse(id, 1, -1, '')
         if lastPicked then
@@ -965,7 +1298,9 @@ function sampev.onShowDialog(id, style, title, b1, b2, text)
             order_seen_at[lastPicked] = nil
             order_retry_at[lastPicked] = nil
             lastPicked = nil
+            lastPickedDist = 0
         end
+        reset_order_notify()
         if catching and not busy then
             catching = false
             pickBest()
@@ -987,6 +1322,7 @@ function sendcef(str)
     raknetBitStreamWriteInt16(bs, #str)
     raknetBitStreamWriteString(bs, str)
     raknetBitStreamWriteInt32(bs, 0)
+    raknetBitStreamResetReadPointer(bs)
     raknetSendBitStream(bs)
     raknetDeleteBitStream(bs)
 end
@@ -995,20 +1331,23 @@ function AHKMessage(text, color)
     sampAddChatMessage('{AA66FF}[Taxi Helper]{FFFFFF} ' .. tostring(text), color or -1)
 end
 
-
-local UPDATE_CURRENT_VERSION = '2.3.1'
-local UPDATE_INFO_URL = 'https://raw.githubusercontent.com/realHansel/TaxiHelper/main/info.upd'
-local UPDATE_SCRIPT_URL = 'https://raw.githubusercontent.com/realHansel/TaxiHelper/main/TaxiHelper.lua'
-local UPDATE_DLSTATUS = require('moonloader').download_status
-local update_state = 'idle'
-local update_latest = ''
-local update_changelog = {}
-local update_dialog_open = imgui.ImBool(false)
-local update_error = ''
-local update_started = 0
-local update_token = 0
-local update_ready = false
-local update_temp_script = nil
+UPDATE_CURRENT_VERSION = '2.4'
+do
+    local ok_v, v = pcall(function() return thisScript().version end)
+    if ok_v and type(v) == 'string' and v:match('^%d+%.%d+') then UPDATE_CURRENT_VERSION = v end
+end
+UPDATE_INFO_URL = 'https://raw.githubusercontent.com/realHansel/TaxiHelper/main/info.upd'
+UPDATE_SCRIPT_URL = 'https://raw.githubusercontent.com/realHansel/TaxiHelper/main/TaxiHelper.lua'
+UPDATE_DLSTATUS = require('moonloader').download_status
+update_state = 'idle'
+update_latest = ''
+update_changelog = {}
+update_dialog_open = imgui.ImBool(false)
+update_error = ''
+update_started = 0
+update_token = 0
+update_ready = false
+update_temp_script = nil
 
 local function update_is_configured()
     return type(UPDATE_INFO_URL) == 'string' and UPDATE_INFO_URL:match('^https://')
@@ -1061,7 +1400,7 @@ local function update_check()
     update_token = update_token + 1
     local token = update_token
     update_started = os.time()
-    local path = getWorkingDirectory() .. '\\config\\TaxiHelper_update_info.tmp'
+    local path = script_base() .. '\\config\\TaxiHelper_update_info.tmp'
     os.remove(path)
     local url = UPDATE_INFO_URL .. (UPDATE_INFO_URL:find('?', 1, true) and '&' or '?') .. 't=' .. tostring(os.time())
     local ok, err = pcall(function()
@@ -1093,7 +1432,6 @@ local function update_check()
                     update_changelog[1] = result.changelog:sub(1, 2000)
                 end
                 update_state = update_newer(update_latest, UPDATE_CURRENT_VERSION) and 'available' or 'current'
-                print('[TaxiHelper / Updater] Latest: ' .. update_latest .. '; installed: ' .. UPDATE_CURRENT_VERSION)
             elseif status == UPDATE_DLSTATUS.STATUS_ERROR then
                 update_fail('Ошибка загрузки info.upd')
             end
@@ -1211,7 +1549,7 @@ local function update_draw_button()
             update_dialog_open.v = true
         elseif update_state == 'checking' or update_state == 'downloading' or update_state == 'installing' then
         elseif update_state == 'unconfigured' then
-            AHKMessage('Ссылка на обновления не настроена. Заполните UPDATE_INFO_URL и UPDATE_SCRIPT_URL в Lua-файле.')
+            AHKMessage('Ссылка на обновления не настроена.')
         else
             update_check()
         end
@@ -1221,8 +1559,6 @@ local function update_draw_button()
         imgui.BeginTooltip()
         if update_state == 'error' then
             imgui.Text(u8(update_error))
-        elseif update_state == 'unconfigured' then
-            imgui.Text(u8'Для автообновления нужны ссылки на ваш GitHub-репозиторий')
         else
             imgui.Text(u8'Установлена версия: ' .. UPDATE_CURRENT_VERSION)
         end
@@ -1233,7 +1569,6 @@ end
 
 local function update_draw_dialog()
     if not update_dialog_open.v or not menu_open.v then return end
-
     local io = imgui.GetIO()
     imgui.SetNextWindowSize(imgui.ImVec2(520, 350), imgui.Cond.Always)
     imgui.SetNextWindowPos(imgui.ImVec2(io.DisplaySize.x * 0.5, io.DisplaySize.y * 0.5), imgui.Cond.Always, imgui.ImVec2(0.5, 0.5))
@@ -1244,7 +1579,6 @@ local function update_draw_dialog()
     imgui.Begin(u8'##TaxiHelperUpdateDialog', update_dialog_open,
         imgui.WindowFlags.NoTitleBar + imgui.WindowFlags.NoResize + imgui.WindowFlags.NoCollapse + imgui.WindowFlags.NoSavedSettings)
     imgui.PushFont(fontsize)
-
     imgui.TextColored(imgui.ImVec4(0.26, 0.98, 0.26, 1.0), u8'ДОСТУПНО ОБНОВЛЕНИЕ')
     imgui.Spacing()
     imgui.TextColored(imgui.ImVec4(0.62, 0.64, 0.70, 1.0), u8'Установлена версия: ' .. UPDATE_CURRENT_VERSION)
@@ -1253,7 +1587,6 @@ local function update_draw_dialog()
     imgui.Spacing()
     imgui.Separator()
     imgui.TextColored(imgui.ImVec4(0.26, 0.98, 0.26, 1.0), u8'Что нового:')
-
     imgui.BeginChild('##taxi_update_changelog', imgui.ImVec2(0, 162), true)
     if #update_changelog == 0 then
         imgui.TextWrapped(u8'Автор пока не добавил список изменений для этой версии.')
@@ -1266,7 +1599,6 @@ local function update_draw_dialog()
         end
     end
     imgui.EndChild()
-
     imgui.Spacing()
     if imgui.Button(u8'Позже##taxi_update_later', imgui.ImVec2(130, 34)) then
         update_dialog_open.v = false
@@ -1276,7 +1608,6 @@ local function update_draw_dialog()
         update_dialog_open.v = false
         update_download()
     end
-
     imgui.PopFont()
     imgui.End()
     imgui.PopStyleColor(2)
@@ -1301,18 +1632,20 @@ local function update_tick()
     return false
 end
 
-local fa_font = nil
-local fa_attempted = false
-local fa_ranges = nil
-local fa_glyphs_verified = false
-local fa_glyphs_ok = false
-local fa_icon_warning = false
-local FA_URL = 'https://raw.githubusercontent.com/FortAwesome/Font-Awesome/v4.7.0/fonts/fontawesome-webfont.ttf'
-local FA_PATH = getWorkingDirectory() .. '\\resource\\fonts\\fontawesome-webfont.ttf'
-local FA_TEMP = FA_PATH .. '.download'
-local fa_downloading = false
-local fa_download_checked = false
-local fa_dlstatus = require('moonloader').download_status
+
+FA_FONT = nil
+FA_ATTEMPTED = false
+FA_RANGES = nil
+FA_GLYPHS_OK = false
+FA_ICON_WARNING = false
+FA_URL_ = 'https://raw.githubusercontent.com/FortAwesome/Font-Awesome/v4.7.0/fonts/fontawesome-webfont.ttf'
+FA_FONTS_DIR = script_base() .. '\\resource\\fonts'
+FA_PATH = FA_FONTS_DIR .. '\\fontawesome-webfont.ttf'
+FA_TEMP = FA_PATH .. '.download'
+FA_DOWNLOADING = false
+FA_DOWNLOAD_CHECKED = false
+FA_DLSTATUS = require('moonloader').download_status
+FA_DRAW_ERROR_LOGGED = false
 
 local function fa_valid_file(path)
     local f = io.open(path, 'rb')
@@ -1324,12 +1657,14 @@ local function fa_valid_file(path)
 end
 
 local function fa_log(msg)
-    print('[Taxi Helper / Font Awesome] ' .. msg)
+    if msg:lower():find('error', 1, true) or msg:lower():find('invalid', 1, true) then
+        print('[Taxi Helper / Font Awesome] ' .. msg)
+    end
 end
 
 local function fa_ensure_font()
-    if fa_download_checked then return end
-    fa_download_checked = true
+    if FA_DOWNLOAD_CHECKED then return end
+    FA_DOWNLOAD_CHECKED = true
     fa_log('Checking font: ' .. FA_PATH)
     if fa_valid_file(FA_PATH) then
         fa_log('Font file found.')
@@ -1339,58 +1674,57 @@ local function fa_ensure_font()
         fa_log('downloadUrlToFile unavailable; install font manually.')
         return
     end
-    local dir = getWorkingDirectory() .. '\\resource\\fonts'
+    local dir = FA_FONTS_DIR
     if type(createDirectory) == 'function' then
-        pcall(createDirectory, getWorkingDirectory() .. '\\resource')
+        pcall(createDirectory, script_base() .. '\\resource')
         pcall(createDirectory, dir)
     end
     os.remove(FA_TEMP)
-    fa_downloading = true
-    fa_log('Font missing; downloading Font Awesome 4.7 from official GitHub...')
+    FA_DOWNLOADING = true
+    fa_log('Font missing; downloading...')
     local ok, err = pcall(function()
-        downloadUrlToFile(FA_URL, FA_TEMP, function(id, status, p1, p2)
-            local ds = fa_dlstatus
+        downloadUrlToFile(FA_URL_, FA_TEMP, function(id, status, p1, p2)
+            local ds = FA_DLSTATUS
             if ds and status == ds.STATUS_ENDDOWNLOADDATA then
-                fa_downloading = false
+                FA_DOWNLOADING = false
                 if fa_valid_file(FA_TEMP) then
-
                     if not fa_valid_file(FA_PATH) then
                         os.remove(FA_PATH)
                         local renamed = os.rename(FA_TEMP, FA_PATH)
                         if not renamed then
-                            fa_log('Could not move downloaded font into fonts directory.')
+                            fa_log('Could not move downloaded font.')
                             return
                         end
                     else
                         os.remove(FA_TEMP)
                     end
-                    fa_log('Font downloaded. Reload TaxiHelper or restart game to enable icons.')
+                    fa_log('Font downloaded.')
                 else
                     os.remove(FA_TEMP)
-                    fa_log('Downloaded font is invalid; continuing with fallback icons.')
+                    fa_log('Downloaded font is invalid.')
                 end
             elseif ds and (status == ds.STATUS_ERROR or status == ds.STATUSEX_ENDDOWNLOAD) then
-                fa_downloading = false
+                FA_DOWNLOADING = false
                 if fa_valid_file(FA_TEMP) then
                     if not fa_valid_file(FA_PATH) then
                         os.remove(FA_PATH)
                         if os.rename(FA_TEMP, FA_PATH) then
-                            fa_log('Font downloaded. Reload TaxiHelper to enable icons.')
+                            fa_log('Font downloaded.')
                         else
-                            fa_log('Could not move downloaded font into fonts directory.')
+                            fa_log('Could not move downloaded font.')
                         end
                     else
                         os.remove(FA_TEMP)
                     end
                 else
                     os.remove(FA_TEMP)
-                    fa_log('Download ended without a valid font; check internet and MoonLoader log.')
+                    fa_log('Download ended without a valid font.')
                 end
             end
         end)
     end)
     if not ok then
-        fa_downloading = false
+        FA_DOWNLOADING = false
         fa_log('Download could not start: ' .. tostring(err))
     end
 end
@@ -1405,21 +1739,18 @@ function imgui.OnInitialize()
     style.FramePadding        = imgui.ImVec2(8, 5)
     style.ItemSpacing         = imgui.ImVec2(8, 8)
     style.ItemInnerSpacing    = imgui.ImVec2(6, 4)
-
     pcall(function()
         style.GrabRounding      = 6
         style.ScrollbarRounding = 6
         style.ScrollbarSize     = 12
         style.WindowTitleAlign  = imgui.ImVec2(0.5, 0.5)
     end)
-
     local colors = style.Colors
     local col = imgui.Col
     local function set(name, v)
         local idx = col[name]
         if idx ~= nil then colors[idx] = v end
     end
-
     set('Text',                 imgui.ImVec4(0.93, 0.93, 0.96, 1.00))
     set('TextDisabled',         imgui.ImVec4(0.52, 0.54, 0.60, 1.00))
     set('WindowBg',             imgui.ImVec4(0.075, 0.078, 0.085, 0.78))
@@ -1464,31 +1795,30 @@ function imgui.BeforeDrawFrame()
         fontsizeNotify    = load_font(19.0)
         fontsizeNotifyBig = load_font(26.0)
     end
-    if not fa_attempted and not fa_downloading then
-        fa_attempted = true
+    if not FA_ATTEMPTED and not FA_DOWNLOADING then
+        FA_ATTEMPTED = true
         local ok, err = pcall(function()
             local ffi = require 'ffi'
-            fa_ranges = imgui.ImGlyphRanges({0xF000, 0xF2FF})
+            FA_RANGES = imgui.ImGlyphRanges({0xF000, 0xF2FF})
             if not fa_valid_file(FA_PATH) then
                 fa_log('Font file not found or invalid: ' .. FA_PATH)
                 return
             end
-            fa_font = imgui.GetIO().Fonts:AddFontFromFileTTF(FA_PATH, 14.0, nil, fa_ranges)
-            if fa_font == nil then
+            FA_FONT = imgui.GetIO().Fonts:AddFontFromFileTTF(FA_PATH, 14.0, nil, FA_RANGES)
+            if FA_FONT == nil then
                 fa_log('AddFontFromFileTTF returned nil')
             else
-                fa_log('Font Awesome registered with imgui.ImGlyphRanges.')
+                fa_log('Font Awesome registered.')
             end
         end)
         if not ok then fa_log('Font initialization error: ' .. tostring(err)) end
     end
 end
 
-local ACCENT      = imgui.ImVec4(0.26, 0.98, 0.26, 1.00)
-local MUTED       = imgui.ImVec4(0.62, 0.64, 0.70, 1.00)
+local ACCENT = imgui.ImVec4(0.26, 0.98, 0.26, 1.00)
+local MUTED  = imgui.ImVec4(0.62, 0.64, 0.70, 1.00)
 
 local menu_tab       = 1
-local reset_day_confirm = false
 local logs_cache     = nil
 local logs_cache_rev = -1
 
@@ -1513,7 +1843,6 @@ local function ui_commit(key)
     cfg.ui[key] = uib[key].v and 1 or 0
     save()
 end
-
 
 local ICONS = {
     rides='\239\134\185',
@@ -1544,38 +1873,34 @@ local ICON_FALLBACK = {
     settings='G', history='H', main='S', total='$', date='D', distance='M'
 }
 
-
 local function fa_draw_at(kind, x, y, fallback, color)
     local saved = imgui.GetCursorScreenPos()
     local rendered = false
-
-
-    fa_glyphs_ok = fa_font ~= nil
-    if fa_font and fa_glyphs_ok then
+    FA_GLYPHS_OK = FA_FONT ~= nil
+    if FA_FONT and FA_GLYPHS_OK then
         local ok, err = pcall(function()
             imgui.SetCursorScreenPos(imgui.ImVec2(x, y))
-            imgui.PushFont(fa_font)
+            imgui.PushFont(FA_FONT)
             local text_ok, text_err = pcall(imgui.Text, ICONS[kind] or ICONS.stats)
             imgui.PopFont()
             if not text_ok then error(text_err) end
         end)
         rendered = ok
-        if not ok and not fa_draw_error_logged then
-            fa_draw_error_logged = true
+        if not ok and not FA_DRAW_ERROR_LOGGED then
+            FA_DRAW_ERROR_LOGGED = true
             fa_log('Icon drawing error: ' .. tostring(err))
         end
     end
     if not rendered then
-        if fa_font and not fa_glyphs_ok and not fa_icon_warning then
-            fa_icon_warning = true
-            fa_log('Icon glyphs missing from atlas; using text fallback. Check font file and ImGui font atlas rebuild.')
+        if FA_FONT and not FA_GLYPHS_OK and not FA_ICON_WARNING then
+            FA_ICON_WARNING = true
+            fa_log('Icon glyphs missing; using text fallback.')
         end
         imgui.SetCursorScreenPos(imgui.ImVec2(x, y))
         imgui.Text(fallback or ICON_FALLBACK[kind] or '*')
     end
     imgui.SetCursorScreenPos(saved)
 end
-
 
 local notification_icon_alpha = 1
 local function fade_draw_color(color)
@@ -1591,11 +1916,10 @@ local function draw_icon(kind, color)
     local fg = fade_draw_color(color or 0xFF44DC66)
     dl:AddRectFilled(imgui.ImVec2(pos.x, pos.y + 1), imgui.ImVec2(pos.x + sz, pos.y + sz + 1), fade_draw_color(0xFF223529), 4)
     dl:AddRect(imgui.ImVec2(pos.x, pos.y + 1), imgui.ImVec2(pos.x + sz, pos.y + sz + 1), fg, 4)
-
     local glyph_width = 14
-    if fa_font then
+    if FA_FONT then
         pcall(function()
-            imgui.PushFont(fa_font)
+            imgui.PushFont(FA_FONT)
             glyph_width = imgui.CalcTextSize(ICONS[kind] or ICONS.stats).x
             imgui.PopFont()
         end)
@@ -1619,7 +1943,7 @@ local function icon_kind_for_label(label)
     if label == L.i_coins then return 'coins' end
     if label == L.i_tips then return 'tips' end
     if label == L.opt_stats then return 'stats' end
-    if label == L.opt_notify then return 'notify' end
+    if label == L.opt_notify or label == L.sound_on then return 'notify' end
     return 'settings'
 end
 
@@ -1654,20 +1978,6 @@ local function menu_section(title)
     imgui.Spacing()
 end
 
-
-local rhAnimT = {}
-local function rhAnim(key, target, speed)
-    local now = os.clock()
-    local s = rhAnimT[key]
-    if not s then s = {v = target, t = now}; rhAnimT[key] = s end
-    local dt = math.min(now - s.t, 0.05)
-    s.t = now
-    s.v = s.v + (target - s.v) * math.min(1, dt * (speed or 14))
-    if math.abs(target - s.v) < 0.002 then s.v = target end
-    return s.v
-end
-
-
 local function rhAlpha(c, al)
     return (c % 16777216) + math.floor(al * 255 + 0.5) * 16777216
 end
@@ -1678,7 +1988,6 @@ local function rhCardBox(drawList, x, y, w, h, bg, border, radius)
     drawList:AddRect(imgui.ImVec2(x, y), imgui.ImVec2(x + w, y + h), border, radius, 15, 1.0)
 end
 
-
 local tab_highlight_y = nil
 local tab_highlight_last = os.clock()
 local menu_fade = 0
@@ -1688,17 +1997,14 @@ local function menu_tab_button(label, idx)
     local dl = imgui.GetWindowDrawList()
     local base_pos = imgui.GetCursorScreenPos()
     local pos = base_pos
-
     local gutter = 9
     local w, h = math.max(20, imgui.GetContentRegionAvail().x - gutter), 38
     pos = imgui.ImVec2(pos.x + gutter, pos.y)
     imgui.SetCursorScreenPos(pos)
-
     if imgui.InvisibleButton('##tab_' .. idx, imgui.ImVec2(w, h)) then
         menu_tab = idx
     end
     local hovered = imgui.IsItemHovered()
-
     if selected then
         local t = os.clock()
         if not tab_highlight_y then tab_highlight_y = pos.y end
@@ -1711,9 +2017,7 @@ local function menu_tab_button(label, idx)
     local bgCol = selected and 0xFF1E3D1E or (hovered and 0xFF2A2A2A or 0xFF181818)
     local borderCol = selected and 0xFF1AE591 or (hovered and 0xFF555555 or 0xFF333333)
     local textCol = selected and 0xFF1AE591 or (hovered and 0xFFFFFFFF or 0xFFCCCCCC)
-
     rhCardBox(dl, pos.x, pos.y, w, h, bgCol, borderCol, 8)
-
     local textX = pos.x + 35
     local kind = idx == 1 and 'main' or (idx == 2 and 'settings' or 'history')
     local letter = idx == 1 and 'S' or (idx == 2 and 'G' or 'H')
@@ -1721,7 +2025,6 @@ local function menu_tab_button(label, idx)
     fa_draw_at(kind, pos.x + 12, pos.y + 10, letter, textCol)
     local textH = imgui.CalcTextSize(label).y
     dl:AddText(imgui.ImVec2(textX, pos.y + (h - textH) / 2), textCol, label)
-
     imgui.SetCursorScreenPos(imgui.ImVec2(base_pos.x, pos.y + h + 4))
 end
 
@@ -1740,7 +2043,6 @@ local function logs_build()
     local list = {}
     local total_money, total_rides = 0, 0
     local cur = today()
-
     for d, r in pairs(history) do
         local rides = tonumber(r.rides) or 0
         local money = tonumber(r.money) or 0
@@ -1758,7 +2060,6 @@ local function logs_build()
             total_rides = total_rides + rides
         end
     end
-
     table.sort(list, function(a, b) return a.date > b.date end)
     logs_cache = { list = list, money = total_money, rides = total_rides }
 end
@@ -1767,53 +2068,43 @@ local function draw_overview()
     imgui.TextColored(MUTED, u8'КРАТКАЯ СВОДКА')
     imgui.Separator()
     imgui.Spacing()
-
     imgui.Columns(2, '##overview_columns', false)
-
     dashboard_card(
         u8'ЗАРАБОТАНО ЗА СЕССИЮ',
         '$' .. format_money(cfg.session.money),
         tostring(cfg.session.rides) .. u8' поездок'
     )
-
     imgui.NextColumn()
-
     dashboard_card(
         u8'ЗАРАБОТАНО СЕГОДНЯ',
         '$' .. format_money(cfg.day.money),
         tostring(cfg.day.rides) .. u8' поездок',
         imgui.ImVec4(0.35, 0.85, 1.0, 1.0)
     )
-
     imgui.NextColumn()
-
     local sr = tonumber(cfg.session.rides) or 0
     local sm = tonumber(cfg.session.money) or 0
-
     dashboard_card(
         u8'СРЕДНИЙ ЧЕК СЕССИИ',
         '$' .. format_money(sr > 0 and sm / sr or 0),
         u8'За текущую сессию'
     )
-
     imgui.NextColumn()
-
     dashboard_card(
         u8'РАБОЧЕЕ ВРЕМЯ СЕГОДНЯ',
         format_time(tonumber(cfg.day.worked) or 0),
         tostring(cfg.day.boxes or 0) .. u8' ларцов получено',
         imgui.ImVec4(0.35, 0.85, 1.0, 1.0)
     )
-
     imgui.Columns(1)
     imgui.Spacing()
     imgui.Separator()
     imgui.TextColored(ACCENT, u8'РАСШИРЕННАЯ СТАТИСТИКА')
     local seven_money, seven_rides, seven_worked = 0, 0, 0
-    local yesterday = os.date('%Y-%m-%d', os.time()-86400)
+    local yesterday = TaxiHelperUi.dayKey(1)
     local yesterday_money = tonumber(history[yesterday] and history[yesterday].money) or 0
     for i=0,6 do
-        local date = os.date('%Y-%m-%d', os.time()-i*86400)
+        local date = TaxiHelperUi.dayKey(i)
         local r = history[date]
         if r then
             seven_money=seven_money+(tonumber(r.money) or 0)
@@ -1829,6 +2120,11 @@ local function draw_overview()
     local delta = (tonumber(cfg.day.money) or 0) - yesterday_money
     imgui.TextColored(delta >= 0 and ACCENT or MUTED,
         u8'Сегодня относительно вчера: ' .. (delta >= 0 and '+' or '-') .. '$' .. format_money(math.abs(delta)))
+end
+
+function TaxiHelperUi.dayKey(offset)
+    local t = os.date('*t')
+    return os.date('%Y-%m-%d', os.time({ year = t.year, month = t.month, day = t.day - offset, hour = 12 }))
 end
 
 function TaxiHelperUi.actionButton(label, width, height, selected, marked)
@@ -1849,14 +2145,11 @@ function TaxiHelperUi.actionButton(label, width, height, selected, marked)
 end
 
 function TaxiHelperUi.numericControl(key, input_buffer, label_id, min_value, max_value, step, width)
-    -- Never rewrite the InputText buffer while it is being edited.
-    -- Persist edits when focus leaves the field instead of writing the ini on every key.
     local was_active = TaxiHelperUi.numericEditActive[key]
     imgui.PushItemWidth(width)
     local changed = imgui.InputText(label_id, input_buffer)
     local active_now = imgui.IsItemActive()
     imgui.PopItemWidth()
-
     if changed then
         local entered = math.floor(TaxiHelperUi.parseNumber(input_buffer.v))
         entered = math.max(min_value, math.min(max_value, entered))
@@ -1864,7 +2157,6 @@ function TaxiHelperUi.numericControl(key, input_buffer, label_id, min_value, max
         uib[key].v = entered
         TaxiHelperUi.numericDirty[key] = true
     end
-
     if was_active and not active_now and not changed then
         if TaxiHelperUi.numericDirty[key] then
             save()
@@ -1873,7 +2165,6 @@ function TaxiHelperUi.numericControl(key, input_buffer, label_id, min_value, max
         input_buffer.v = format_money(cfg.ui[key] or min_value)
     end
     TaxiHelperUi.numericEditActive[key] = active_now
-
     imgui.SameLine(nil, 6)
     if TaxiHelperUi.actionButton('-##th_minus_' .. key, 30, 28) then
         local new_amount = math.max(min_value, (tonumber(cfg.ui[key]) or min_value) - step)
@@ -1933,7 +2224,6 @@ local function draw_goal_edit_dialog()
         goal_keyboard_save = false
         return
     end
-
     local io = imgui.GetIO()
     imgui.SetNextWindowSize(imgui.ImVec2(425, 199), imgui.Cond.Always)
     imgui.SetNextWindowPos(imgui.ImVec2(io.DisplaySize.x / 2, io.DisplaySize.y / 2),
@@ -1944,7 +2234,6 @@ local function draw_goal_edit_dialog()
     imgui.PushStyleColor(imgui.Col.Border, imgui.ImVec4(0.20, 0.56, 0.29, 0.85))
     imgui.Begin(u8'##TaxiHelperGoalEdit', nil,
         imgui.WindowFlags.NoTitleBar + imgui.WindowFlags.NoResize + imgui.WindowFlags.NoSavedSettings + imgui.WindowFlags.NoMove)
-
     imgui.TextColored(ACCENT, u8'ИЗМЕНЕНИЕ ДНЕВНОЙ ЦЕЛИ')
     imgui.Separator()
     imgui.TextColored(MUTED, u8'Начните вводить новую сумму цифрами.')
@@ -1972,7 +2261,6 @@ end
 
 local function draw_settings()
     imgui.BeginChild('##settings', imgui.ImVec2(0, 0), false)
-
     menu_section(L.sec_windows)
     if ui_toggle('stats', L.opt_stats, show) then save() end
     if ui_toggle('notify', L.opt_notify, uib.notify) then ui_commit('notify') end
@@ -1982,23 +2270,19 @@ local function draw_settings()
         show.v = true
         menu_open.v = false
     end
-
     menu_section(L.sec_goal)
     imgui.Text(L.goal_amount)
     imgui.SameLine(200)
     draw_goal_editor()
     imgui.TextColored(MUTED, L.goal_off)
-
     menu_section(L.sec_session)
     for _, it in ipairs(SESSION_ITEMS) do
         if ui_toggle(it.key, it.label, uib[it.key]) then ui_commit(it.key) end
     end
-
     menu_section(L.sec_day)
     for _, it in ipairs(DAY_ITEMS) do
         if ui_toggle(it.key, it.label, uib[it.key]) then ui_commit(it.key) end
     end
-
     menu_section(L.sec_orders)
     if ui_toggle('auto_catch', L.auto_catch, uib.auto_catch) then
         ui_commit('auto_catch')
@@ -2036,17 +2320,59 @@ local function draw_settings()
     end
     if imgui.IsItemHovered() then
         imgui.BeginTooltip()
-        imgui.Text(u8'Ждёт 50 мс и выбирает ближайший заказ. Если не удалось - пробует следующий.')
+        imgui.Text(u8'Ждёт 50 мс и выбирает ближайший заказ.')
         imgui.EndTooltip()
     end
     imgui.Spacing()
     icon_text('distance', L.order_dist)
     imgui.SameLine(200)
     TaxiHelperUi.numericControl('max_distance', TaxiHelperUi.distanceInput, '##th_max_dist', 100, 20000, 100, 150)
-
+    imgui.Spacing()
+    if ui_toggle('sound_on', L.sound_on, uib.sound_on) then ui_commit('sound_on') end
+    if uib.sound_on.v then
+        imgui.Spacing()
+        icon_text('notify', L.sound_kind)
+        for kind = 1, 6 do
+            local selected = uib.sound_kind.v == kind
+            if TaxiHelperUi.actionButton(L['snd_' .. kind] .. '##th_snd_kind_' .. kind, 150, 30, selected) then
+                uib.sound_kind.v = kind
+                cfg.ui.sound_kind = kind
+                save()
+                if kind == 6 then TaxiHelperSound.ensure_yandex() end
+                TaxiHelperSound.play_selected()
+            end
+            if kind == 5 and imgui.IsItemHovered() then
+                imgui.BeginTooltip()
+                imgui.Text(u8'Положи файл custom.mp3 (или .wav / .ogg) в moonloader\\resource\\TaxiHelper')
+                imgui.EndTooltip()
+            end
+            if kind == 6 and imgui.IsItemHovered() then
+                imgui.BeginTooltip()
+                imgui.Text(u8'Скачивается автоматически при запуске. Файл: moonloader\\resource\\TaxiHelper\\yandex.mp3')
+                imgui.EndTooltip()
+            end
+            if kind == 1 or kind == 2 or kind == 4 or kind == 5 then imgui.SameLine(nil, 8) end
+        end
+        imgui.Spacing()
+        icon_text('notify', L.sound_volume)
+        imgui.SameLine(200)
+        imgui.PushItemWidth(190)
+        if imgui.SliderInt('##th_snd_volume', uib.sound_volume, 0, 100) then
+            cfg.ui.sound_volume = uib.sound_volume.v
+            TaxiHelperUi.soundDirty = true
+        end
+        imgui.PopItemWidth()
+        if TaxiHelperUi.soundDirty and not imgui.IsMouseDown(0) then
+            TaxiHelperUi.soundDirty = false
+            save()
+        end
+        imgui.SameLine(nil, 8)
+        if TaxiHelperUi.actionButton(L.sound_test .. '##th_snd_test', 150, 28) then
+            TaxiHelperSound.play_selected()
+        end
+    end
     imgui.EndChild()
 end
-
 
 local calendar_month = os.date('*t').month
 local calendar_year = os.date('*t').year
@@ -2110,20 +2436,6 @@ local function draw_calendar()
 end
 
 local history_view = 1
-local function draw_events()
-    imgui.TextColored(ACCENT, u8'ЖУРНАЛ УВЕДОМЛЕНИЙ')
-    imgui.TextColored(MUTED, u8'Последние ' .. tostring(EVENT_LIMIT) .. ' событий')
-    imgui.Separator()
-    imgui.BeginChild('##event_list', imgui.ImVec2(0,0), true)
-    if #event_log == 0 then imgui.TextDisabled(u8'Пока нет событий') end
-    for _, e in ipairs(event_log) do
-        imgui.TextColored(MUTED, e.time)
-        imgui.SameLine(170)
-        imgui.Text(u8(e.text))
-    end
-    imgui.EndChild()
-end
-
 local function draw_logs()
     if TaxiHelperUi.actionButton(u8'История по дням##hist_days', 170, 30, history_view == 1) then history_view=1 end
     imgui.SameLine(nil, 7)
@@ -2138,22 +2450,17 @@ local function draw_logs()
         logs_cache_rev = history_rev
     end
     local c = logs_cache
-
     menu_section(L.sec_total)
-
     imgui.PushFont(fontsizeBig)
     imgui.TextColored(DOLLAR_COLOR, '$')
     imgui.SameLine(nil, 4)
     imgui.Text(format_money(c.money))
     imgui.PopFont()
-
     local avg = c.rides > 0 and c.money / c.rides or 0
     imgui.TextColored(MUTED, string.format(L.total_fmt, c.rides, #c.list, format_money(avg)))
-
     imgui.Spacing()
     imgui.Separator()
     imgui.Spacing()
-
     icon_text('date', L.col_date, MUTED)
     imgui.SameLine(200)
     icon_text('rides', L.col_rides, MUTED)
@@ -2161,13 +2468,10 @@ local function draw_logs()
     icon_text('earned', L.col_money, MUTED)
     imgui.SameLine(450)
     icon_text('avg', L.col_avg, MUTED)
-
     imgui.BeginChild('##loglist', imgui.ImVec2(0, 0), true)
-
     if #c.list == 0 then
         imgui.TextDisabled(L.no_data)
     end
-
     for _, r in ipairs(c.list) do
         imgui.Text(r.label)
         if r.today then
@@ -2181,53 +2485,38 @@ local function draw_logs()
         imgui.SameLine(450)
         draw_money(r.avg)
     end
-
     imgui.EndChild()
-end
-
-local function draw_with_animation(draw_func)
-    draw_func()
 end
 
 local function draw_menu()
     local io = imgui.GetIO()
     imgui.SetNextWindowSize(imgui.ImVec2(960, 580), imgui.Cond.Always)
     imgui.SetNextWindowPos(imgui.ImVec2(io.DisplaySize.x / 2, io.DisplaySize.y / 2), imgui.Cond.FirstUseEver, imgui.ImVec2(0.5, 0.5))
-
     imgui.PushStyleVar(imgui.StyleVar.WindowRounding, 3)
     imgui.PushStyleVar(imgui.StyleVar.FrameRounding, 3)
     imgui.PushStyleVar(imgui.StyleVar.ChildWindowRounding, 3)
     imgui.PushStyleVar(imgui.StyleVar.WindowPadding, imgui.ImVec2(14, 14))
     imgui.PushStyleVar(imgui.StyleVar.ItemSpacing, imgui.ImVec2(9, 8))
-
     imgui.PushStyleColor(imgui.Col.WindowBg, imgui.ImVec4(0.075, 0.078, 0.085, 0.90))
     imgui.PushStyleColor(imgui.Col.Border, imgui.ImVec4(0.20, 0.21, 0.22, 1.0))
-
     imgui.Begin(u8'##TaxiHelper', menu_open, imgui.WindowFlags.NoCollapse + imgui.WindowFlags.NoResize + imgui.WindowFlags.NoTitleBar + imgui.WindowFlags.NoScrollbar + imgui.WindowFlags.NoScrollWithMouse)
-
-
     local winPos = imgui.GetWindowPos()
     local winSize = imgui.GetWindowSize()
     local titleBarHeight = 24
-
-
-    if imgui.IsMouseHoveringRect(winPos, imgui.ImVec2(winPos.x + winSize.x, winPos.y + titleBarHeight), false) and not imgui.IsMouseHoveringRect(imgui.ImVec2(winPos.x + winSize.x - 280, winPos.y + 12), imgui.ImVec2(winPos.x + winSize.x, winPos.y + 60), false) then
-        if imgui.IsMouseDown(0) then
-            local mousePos = imgui.GetMousePos()
-            if not dragStartPos then
-                dragStartPos = { x = mousePos.x - winPos.x, y = mousePos.y - winPos.y }
-            end
+    local in_strip = imgui.IsMouseHoveringRect(winPos, imgui.ImVec2(winPos.x + winSize.x, winPos.y + titleBarHeight), false)
+        and not imgui.IsMouseHoveringRect(imgui.ImVec2(winPos.x + winSize.x - 280, winPos.y + 12), imgui.ImVec2(winPos.x + winSize.x, winPos.y + 60), false)
+    if imgui.IsMouseDown(0) then
+        local mousePos = imgui.GetMousePos()
+        if not dragStartPos and in_strip and imgui.IsMouseClicked(0) then
+            dragStartPos = { x = mousePos.x - winPos.x, y = mousePos.y - winPos.y }
+        end
+        if dragStartPos then
             imgui.SetWindowPos(imgui.ImVec2(mousePos.x - dragStartPos.x, mousePos.y - dragStartPos.y))
-        else
-            dragStartPos = nil
         end
     else
         dragStartPos = nil
     end
-
-
     imgui.PushFont(fontsize)
-
     imgui.BeginChild('##sidebar', imgui.ImVec2(174, 0), true, imgui.WindowFlags.NoScrollbar)
     imgui.Spacing()
     imgui.TextColored(ACCENT, u8'TAXI')
@@ -2237,11 +2526,9 @@ local function draw_menu()
     imgui.Spacing()
     imgui.Separator()
     imgui.Spacing()
-
     menu_tab_button(u8'Главная', 1)
     menu_tab_button(u8'Настройки', 2)
     menu_tab_button(u8'История', 3)
-
     imgui.Spacing()
     imgui.Separator()
     imgui.TextColored(MUTED, u8'ТЕКУЩАЯ СЕССИЯ')
@@ -2255,27 +2542,21 @@ local function draw_menu()
     imgui.Separator()
     imgui.TextColored(MUTED, u8'ESC  -  Закрыть меню')
     imgui.EndChild()
-
     imgui.SameLine()
     imgui.BeginChild('##maincontent', imgui.ImVec2(0, 0), false, imgui.WindowFlags.NoScrollbar + imgui.WindowFlags.NoScrollWithMouse)
     update_draw_button()
-
-    draw_with_animation(function()
-        if menu_tab == 1 then
-            draw_overview()
+    if menu_tab == 1 then
+        draw_overview()
+    else
+        imgui.Separator()
+        imgui.Spacing()
+        if menu_tab == 2 then
+            draw_settings()
         else
-            imgui.Separator()
-            imgui.Spacing()
-            if menu_tab == 2 then
-                draw_settings()
-            else
-                draw_logs()
-            end
+            draw_logs()
         end
-    end)
-
+    end
     imgui.EndChild()
-
     imgui.PopFont()
     imgui.End()
     imgui.PopStyleColor(2)
@@ -2291,19 +2572,16 @@ function imgui.OnDrawFrame()
         if not edit_mode then
             flags = flags + imgui.WindowFlags.NoMove + imgui.WindowFlags.NoInputs
         end
-
         imgui.SetNextWindowPos(
             imgui.ImVec2(tonumber(cfg.window.x) or 100, tonumber(cfg.window.y) or 100),
             imgui.Cond.FirstUseEver
         )
-
         imgui.PushStyleVar(imgui.StyleVar.WindowRounding, 10)
         imgui.PushStyleVar(imgui.StyleVar.WindowPadding, imgui.ImVec2(14, 12))
         imgui.PushStyleVar(imgui.StyleVar.ItemSpacing, imgui.ImVec2(8, 2))
         imgui.PushStyleColor(imgui.Col.WindowBg, WINDOW_BG)
         imgui.PushStyleColor(imgui.Col.Border, WINDOW_BORDER)
         imgui.Begin(L.window, show, flags)
-
         if edit_mode then
             imgui.PushFont(fontsize)
             imgui.TextColored(imgui.ImVec4(0.26, 0.98, 0.26, 1.0), L.move_mode)
@@ -2319,7 +2597,6 @@ function imgui.OnDrawFrame()
             colored_separator(66, 220, 82)
             imgui.PopFont()
         end
-
         imgui.PushFont(fontsizeBig)
         local win_w = imgui.GetWindowWidth()
         local text_taxi = u8'TAXI'
@@ -2331,24 +2608,19 @@ function imgui.OnDrawFrame()
         imgui.SameLine(nil, 0)
         imgui.TextColored(TAXI_WHITE, text_helper)
         imgui.PopFont()
-
         local any_s = uib.s_rides.v or uib.s_money.v or uib.s_avg.v or uib.s_time.v
-
         if any_s then
             imgui.PushFont(fontsize)
-
             if uib.s_rides.v then
                 icon_text('rides', L.rides)
                 imgui.SameLine(COL_X)
                 imgui.Text(tostring(cfg.session.rides))
             end
-
             if uib.s_money.v then
                 icon_text('earned', L.earned)
                 imgui.SameLine(COL_X)
                 draw_money(cfg.session.money)
             end
-
             if uib.s_avg.v then
                 icon_text('avg', L.avg)
                 imgui.SameLine(COL_X)
@@ -2359,7 +2631,6 @@ function imgui.OnDrawFrame()
                     imgui.TextDisabled(L.dash)
                 end
             end
-
             if uib.s_time.v then
                 icon_text('time', L.session_time)
                 imgui.SameLine(COL_X)
@@ -2371,29 +2642,22 @@ function imgui.OnDrawFrame()
                     imgui.TextDisabled(L.long_dash)
                 end
             end
-
             imgui.PopFont()
-
             colored_separator(SEP_SESSION[1], SEP_SESSION[2], SEP_SESSION[3])
         end
-
         local any_d = uib.d_money.v or uib.d_worked.v or uib.d_rides.v or uib.d_boxes.v
             or uib.d_coins.v or uib.d_tips.v or uib.d_avg.v
-
         if any_d then
             imgui.PushFont(fontsizeBig)
             colored_centered_header(L.day_header, HEADER_DAY_COLOR)
             imgui.PopFont()
-            imgui.Dummy(imgui.ImVec2(0, 5)) 
-
+            imgui.Dummy(imgui.ImVec2(0, 5))
             imgui.PushFont(fontsize)
-
             if uib.d_money.v then
                 icon_text('earned', L.earned)
                 imgui.SameLine(COL_X)
                 draw_money(cfg.day.money)
             end
-
             if uib.d_avg.v then
                 icon_text('avg', L.avg)
                 imgui.SameLine(COL_X)
@@ -2404,13 +2668,11 @@ function imgui.OnDrawFrame()
                     imgui.TextDisabled(L.dash)
                 end
             end
-
             if uib.d_rides.v then
                 icon_text('rides', L.rides)
                 imgui.SameLine(COL_X)
                 imgui.Text(tostring(cfg.day.rides))
             end
-
             if uib.d_worked.v then
                 icon_text('worked', L.worked)
                 imgui.SameLine(COL_X)
@@ -2424,19 +2686,16 @@ function imgui.OnDrawFrame()
                     imgui.TextDisabled(L.long_dash)
                 end
             end
-
             if uib.d_boxes.v then
                 icon_text('boxes', L.i_boxes .. ':')
                 imgui.SameLine(COL_X)
                 imgui.Text(format_money(cfg.day.boxes))
             end
-
             if uib.d_coins.v then
                 icon_text('coins', L.i_coins .. ':')
                 imgui.SameLine(COL_X)
                 imgui.Text(format_money(cfg.day.coins))
             end
-
             if uib.d_tips.v then
                 icon_text('tips', L.i_tips .. ':')
                 imgui.SameLine(COL_X)
@@ -2446,12 +2705,9 @@ function imgui.OnDrawFrame()
                     imgui.Text(format_money(cfg.day.tips))
                 end
             end
-
             imgui.PopFont()
-
             colored_separator(SEP_DAY[1], SEP_DAY[2], SEP_DAY[3])
         end
-
         imgui.End()
         imgui.PopStyleColor(2)
         imgui.PopStyleVar(3)
@@ -2460,19 +2716,13 @@ function imgui.OnDrawFrame()
     local alpha = notification_alpha()
     if alpha > 0 then
         local io = imgui.GetIO()
+        local elapsed = game_ms() - notification.started
+        notification_icon_alpha = alpha
         local flagsNotify = imgui.WindowFlags.NoTitleBar
             + imgui.WindowFlags.NoResize
             + imgui.WindowFlags.NoMove
             + imgui.WindowFlags.NoSavedSettings
             + imgui.WindowFlags.NoInputs
-
-        local elapsed = game_ms() - notification.started
-
-
-        local bg_alpha = 1
-        local text_alpha = 1
-        notification_icon_alpha = alpha
-
 
         local goal_enabled = (tonumber(cfg.ui.goal_amount) or 0) > 0
         imgui.SetNextWindowSize(imgui.ImVec2(395, goal_enabled and 251 or 174), imgui.Cond.Always)
@@ -2481,61 +2731,43 @@ function imgui.OnDrawFrame()
             imgui.Cond.Always,
             imgui.ImVec2(0.5, 0.0)
         )
-
         imgui.PushStyleVar(imgui.StyleVar.Alpha, alpha)
         imgui.PushStyleVar(imgui.StyleVar.WindowRounding, 11)
         imgui.PushStyleVar(imgui.StyleVar.WindowPadding, imgui.ImVec2(16, 12))
         imgui.PushStyleVar(imgui.StyleVar.ItemSpacing, imgui.ImVec2(7, 5))
-
-        imgui.PushStyleColor(imgui.Col.WindowBg, imgui.ImVec4(0.04, 0.05, 0.07, 0.85 * bg_alpha))
-        imgui.PushStyleColor(imgui.Col.Border, imgui.ImVec4(1.0, 0.85, 0.2, 0.8 * bg_alpha))
-        imgui.PushStyleColor(imgui.Col.Text, imgui.ImVec4(1.0, 1.0, 1.0, text_alpha))
-
+        imgui.PushStyleColor(imgui.Col.WindowBg, imgui.ImVec4(0.04, 0.05, 0.07, 0.85))
+        imgui.PushStyleColor(imgui.Col.Border, imgui.ImVec4(1.0, 0.85, 0.2, 0.8))
+        imgui.PushStyleColor(imgui.Col.Text, imgui.ImVec4(1.0, 1.0, 1.0, 1.0))
         notification_show.v = true
         imgui.Begin(L.notify_id, notification_show, flagsNotify)
-
         imgui.PushFont(fontsizeNotifyBig)
         local title = L.ride_done
         local title_w = imgui.CalcTextSize(title).x
         imgui.SetCursorPosX((imgui.GetWindowWidth() - title_w) / 2)
-
-        local pulse = (0.9 + 0.1 * math.sin(elapsed / 260)) * text_alpha
+        local pulse = (0.9 + 0.1 * math.sin(elapsed / 260))
         icon_text('rides', title, imgui.ImVec4(1.0, 0.85, 0.15, pulse))
         imgui.PopFont()
-
         imgui.Spacing()
-
         imgui.PushFont(fontsizeNotify)
-
         local count_duration = 700
         local count_progress = math.min(elapsed / count_duration, 1.0)
-        local count_ease = count_progress * count_progress * (3 - 2 * count_progress) 
-
+        local count_ease = count_progress * count_progress * (3 - 2 * count_progress)
         local display_money = notification.ride_money * count_ease
-
         local plus = L.plus .. format_money(display_money)
         local plus_w = imgui.CalcTextSize(plus).x
         imgui.SetCursorPosX((imgui.GetWindowWidth() - plus_w) / 2)
-
-        imgui.TextColored(imgui.ImVec4(0.35, 1.0, 0.35, text_alpha), plus)
-
+        imgui.TextColored(imgui.ImVec4(0.35, 1.0, 0.35, 1.0), plus)
         imgui.Spacing()
-
         imgui.Separator()
         imgui.Spacing()
-
-
         local amount_x = 233
         icon_text('earned', L.session_sum)
         imgui.SameLine(amount_x)
-        imgui.TextColored(imgui.ImVec4(0.35, 1.0, 0.35, text_alpha), '$ ' .. format_money(notification.session_money))
-
+        imgui.TextColored(imgui.ImVec4(0.35, 1.0, 0.35, 1.0), '$ ' .. format_money(notification.session_money))
         icon_text('day', L.day_sum)
         imgui.SameLine(amount_x)
-        imgui.TextColored(imgui.ImVec4(0.35, 1.0, 0.35, text_alpha), '$ ' .. format_money(notification.day_money))
-
+        imgui.TextColored(imgui.ImVec4(0.35, 1.0, 0.35, 1.0), '$ ' .. format_money(notification.day_money))
         imgui.PopFont()
-
         local goal_amount = math.max(0, tonumber(cfg.ui.goal_amount) or 0)
         if goal_amount > 0 then
             local earned = math.max(0, tonumber(notification.day_money) or 0)
@@ -2548,8 +2780,6 @@ function imgui.OnDrawFrame()
             local pct = math.max(0, math.floor(animated_ratio * 100 + 0.5))
             local fill_ratio = math.max(0, math.min(animated_ratio, 1))
             local remaining = math.max(0, goal_amount - earned)
-
-            -- The goal has its own distinct card, rather than two identical green bars.
             imgui.Spacing()
             local p = imgui.GetCursorScreenPos()
             local w = imgui.GetContentRegionAvail().x
@@ -2557,15 +2787,13 @@ function imgui.OnDrawFrame()
             local dl = imgui.GetWindowDrawList()
             dl:AddRectFilled(imgui.ImVec2(p.x, p.y),
                 imgui.ImVec2(p.x + w, p.y + h), fade_draw_color(0xB51A2320), 7)
-
-            local title = remaining == 0 and u8'Цель достигнута!' or (u8'До цели: $' .. format_money(remaining))
+            local title2 = remaining == 0 and u8'Цель достигнута!' or (u8'До цели: $' .. format_money(remaining))
             local pct_text = tostring(pct) .. '%'
             dl:AddText(imgui.ImVec2(p.x + 12, p.y + 9),
-                fade_draw_color(remaining == 0 and 0xFF71F18D or 0xFFCED9D1), title)
+                fade_draw_color(remaining == 0 and 0xFF71F18D or 0xFFCED9D1), title2)
             local pct_w = imgui.CalcTextSize(pct_text).x
             dl:AddText(imgui.ImVec2(p.x + w - pct_w - 12, p.y + 9),
                 fade_draw_color(0xFF6AF18B), pct_text)
-
             local track_x, track_y = p.x + 12, p.y + 34
             local track_w, track_h = w - 24, 6
             dl:AddRectFilled(imgui.ImVec2(track_x, track_y),
@@ -2576,15 +2804,12 @@ function imgui.OnDrawFrame()
                     imgui.ImVec2(track_x + math.max(2, track_w * fill_ratio), track_y + track_h),
                     fade_draw_color(0xFF40D76B), track_h / 2)
             end
-
             local goal_text = '$' .. format_money(earned) .. '  /  $' .. format_money(goal_amount)
             local goal_text_w = imgui.CalcTextSize(goal_text).x
             dl:AddText(imgui.ImVec2(p.x + (w - goal_text_w) / 2, p.y + 50),
                 fade_draw_color(0xFFC4CDC7), goal_text)
             imgui.Dummy(imgui.ImVec2(0, h))
         end
-
-        -- Muted countdown line: closer to the goal card, kept distinct from earnings.
         if goal_amount <= 0 then imgui.Spacing() end
         local timer_ratio = math.max(0, math.min(1, 1.0 - elapsed / NOTIFY_DURATION))
         local p = imgui.GetCursorScreenPos()
@@ -2600,9 +2825,7 @@ function imgui.OnDrawFrame()
                 fade_draw_color(0xD0A4B3AA), 1)
         end
         imgui.Dummy(imgui.ImVec2(0, timer_h + 2))
-
         imgui.End()
-
         imgui.PopStyleColor(3)
         imgui.PopStyleVar(4)
         notification_icon_alpha = 1
@@ -2625,15 +2848,20 @@ end
 function main()
     while not isSampAvailable() do wait(100) end
 
+    pcall(function()
+        if type(createDirectory) == 'function' then
+            createDirectory(script_base() .. '\\config')
+        end
+    end)
+
     fa_ensure_font()
+    TaxiHelperSound.ensure_yandex()
     update_check()
     history_load()
     event_load()
 
     local recovered = tonumber(cfg.session.unfinished) or 0
     if recovered > 0 then
-
-
         cfg.day.worked = (tonumber(cfg.day.worked) or 0) + recovered
         cfg.session.unfinished = 0
         history_sync()
@@ -2648,19 +2876,14 @@ function main()
         if not menu_open.v then goal_keyboard_editor = false end
     end)
 
-
-
-
     AHKMessage('Успешно загружен. Меню - /thelper')
     local startup_update_notice_pending = true
-
     local last_connected = false
     local last_tick = 0
     local last_order_poll = 0
 
     while true do
         if goal_keyboard_editor and not menu_open.v then goal_keyboard_editor = false end
-        -- Save text edits if the player closes the menu or changes tabs mid-edit.
         if not menu_open.v or menu_tab ~= 2 then
             if TaxiHelperUi.numericDirty.max_distance then
                 TaxiHelperUi.distanceInput.v = format_money(cfg.ui.max_distance or 3500)
@@ -2672,7 +2895,7 @@ function main()
         imgui.Process = gta and (show.v or notification.active or menu_open.v)
         if startup_update_notice_pending then
             if update_state == 'available' then
-                AHKMessage('Доступно обновление TaxiHelper v' .. update_latest .. '. Откройте /thelper для просмотра изменений.', 0x55FF77)
+                AHKMessage('Доступно обновление TaxiHelper v' .. update_latest .. '.', 0x55FF77)
                 startup_update_notice_pending = false
             elseif update_state == 'current' or update_state == 'error' or update_state == 'unconfigured' then
                 startup_update_notice_pending = false
@@ -2684,14 +2907,13 @@ function main()
             if catching and clock - catchStart > CATCH_TIMEOUT then
                 catching = false
                 if lastPicked then
-                    if uib.bot_only.v then
-                        print(('[TaxiHelper][BotFilter] timeout id=%d, retry after %d ms'):format(lastPicked, ORDER_RETRY_DELAY))
-                    end
                     order_retry_at[lastPicked] = clock + ORDER_RETRY_DELAY
                     lastPicked = nil
+                    lastPickedDist = 0
                 end
+                order_notify.pickup_seen = false
             end
-            if not busy and not catching and clock - last_order_poll >= 40 then
+            if not busy and not catching and clock - last_order_poll >= 10 then
                 last_order_poll = clock
                 pickBest()
             end
@@ -2700,23 +2922,19 @@ function main()
         local t = now()
         if t ~= last_tick then
             last_tick = t
-
             local ok = sampGetPlayerIdByCharHandle(playerPed)
             local connected = ok and true or false
-
             if last_connected and not connected then
                 finish_work_interval()
                 reset_session()
                 AHKMessage('Отключение от сервера. Сессия сброшена.')
             end
             last_connected = connected
-
             if session_start > 0 and t - last_unfinished_save >= UNFINISHED_SAVE_INTERVAL then
                 cfg.session.unfinished = math.max(0, t - work_segment_start)
                 inicfg.save(cfg, config_path)
                 last_unfinished_save = t
             end
-
             check_new_day()
             while #pending_deliveries > 0 and t - pending_deliveries[1] > PAYMENT_TIMEOUT do
                 table.remove(pending_deliveries, 1)
@@ -2734,6 +2952,6 @@ function main()
             thisScript():reload()
             return
         end
-        wait(50)
+        wait(10)
     end
 end
