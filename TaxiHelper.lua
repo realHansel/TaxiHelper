@@ -130,9 +130,9 @@ local lastPickedDist = 0
 local AUTO          = true
 local NEAREST       = true
 local CATCH_TIMEOUT = 3500
-local ORDER_RETRY_DELAY = 4000
+local ORDER_RETRY_DELAY = 1000
 local ORDER_STALE_MS = 120000
-local ORDER_COLLECT_MS = 50
+local ORDER_COLLECT_MS = 10
 local order_collect_start = 0
 local order_collect_until = 0
 
