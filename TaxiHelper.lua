@@ -1,5 +1,5 @@
-script_name('Taxi Helper 2.5')
-script_version('2.5')
+script_name('Taxi Helper 2.5.1')
+script_version('2.5.1')
 
 require 'lib.moonloader'
 local sampev = require 'samp.events'
@@ -2654,8 +2654,9 @@ local function draw_settings()
     icon_text('earned', L.meter_coeff, MUTED)
     imgui.SameLine(200)
     imgui.PushItemWidth(150)
-    if imgui.InputText('##th_meter_coeff', TaxiHelperUi.meterInput) then
-        local v = tonumber((TaxiHelperUi.meterInput.v or ''):gsub(',', '.'))
+if imgui.InputText('##th_meter_coeff', TaxiHelperUi.meterInput) then
+        local meter_str = (TaxiHelperUi.meterInput.v or ''):gsub(',', '.')
+        local v = tonumber(meter_str)
         if v and v >= METER_MIN_COEFF and v <= METER_MAX_COEFF then
             cfg.ui.meter_coeff = v
             if uib.meter_auto.v then
