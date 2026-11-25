@@ -898,6 +898,39 @@ local function meter_coeff_str(k)
     return s
 end
 
+-- Название машины приходит из CEF в CP1251. imgui ждёт UTF-8,
+-- поэтому перед выводом конвертируем, если строка не является корректным UTF-8.
+function meter_car_display(car)
+    car = tostring(car or '')
+    if car == '' then return '' end
+    local valid = true
+    local i, len = 1, #car
+    while i <= len do
+        local b = car:byte(i)
+        if b < 0x80 then
+            i = i + 1
+        elseif b >= 0xC2 and b <= 0xDF then
+            local b2 = car:byte(i + 1)
+            if not b2 or b2 < 0x80 or b2 > 0xBF then valid = false break end
+            i = i + 2
+        elseif b >= 0xE0 and b <= 0xEF then
+            local b2, b3 = car:byte(i + 1), car:byte(i + 2)
+            if not b2 or not b3 or b2 < 0x80 or b2 > 0xBF or b3 < 0x80 or b3 > 0xBF then
+                valid = false
+                break
+            end
+            i = i + 3
+        else
+            valid = false
+            break
+        end
+    end
+    if valid then return car end
+    local ok, converted = pcall(u8, car)
+    if ok and type(converted) == 'string' and converted ~= '' then return converted end
+    return car
+end
+
 local function meter_short_money(n)
     n = tonumber(n) or 0
     if n >= 1000000000 then return string.format('%.1fB', n / 1000000000) end
@@ -2641,11 +2674,12 @@ local function draw_settings()
     end
     imgui.Spacing()
     local meter_rec = (meter.car ~= '') and meter_data[meter.car] or nil
+    local meter_car_txt = meter_car_display(meter.car)
     if meter_rec then
-        imgui.TextColored(MUTED, u8('Машина: ') .. meter.car .. u8('  -  x') .. meter_coeff_str(meter_rec.k)
+        imgui.TextColored(MUTED, u8('Машина: ') .. meter_car_txt .. u8('  -  x') .. meter_coeff_str(meter_rec.k)
             .. '  (' .. tostring(meter_rec.n) .. u8(' рейс.)'))
     else
-        local prefix = (meter.car ~= '') and (u8('Машина: ') .. meter.car .. u8('  -  ')) or ''
+        local prefix = (meter_car_txt ~= '') and (u8('Машина: ') .. meter_car_txt .. u8('  -  ')) or ''
         imgui.TextColored(MUTED, prefix .. L.meter_need)
     end
     imgui.Spacing()
