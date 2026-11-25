@@ -1,5 +1,5 @@
-script_name('Taxi Helper 2.4')
-script_version('2.4')
+script_name('Taxi Helper 2.5')
+script_version('2.5')
 
 require 'lib.moonloader'
 local sampev = require 'samp.events'
@@ -91,6 +91,26 @@ local L = {
     sec_goal     = u8'ЦЕЛЬ ЗАРАБОТКА',
     goal_amount  = u8'Цель на день ($)',
     goal_off     = u8'0 - отключить отображение цели',
+    sec_meter    = u8'ТАКСОМЕТР',
+    meter_show   = u8'Показывать таксометр',
+    meter_auto   = u8'Автокалибровка по оплате',
+    meter_coeff  = u8'Коэффициент',
+    meter_move   = u8'Переместить таксометр',
+    meter_title  = u8'ТАКСОМЕТР',
+    meter_base   = u8'База',
+    meter_income = u8'Доход',
+    meter_time   = u8'В пути',
+    meter_need   = u8'Нужна калибровка — сделайте один рейс',
+    meter_paid   = u8'Оплачено',
+    meter_reset  = u8'Сбросить калибровку',
+    sec_keys     = u8'БЫСТРОЕ МЕНЮ',
+    menu_key     = u8'Открытие меню',
+    key_bind     = u8'Клавиша',
+    key_none     = u8'не назначена',
+    key_press    = u8'Жмите клавишу...',
+    key_off      = u8'Убрать',
+    key_hint     = u8'Esc - отмена. Не срабатывает в чате и диалогах.',
+    key_note     = u8'Меню также открывается командой /thelper',
 }
 
 local DOLLAR_COLOR     = imgui.ImVec4(0.35, 1.0, 0.35, 1.0)
@@ -130,9 +150,9 @@ local lastPickedDist = 0
 local AUTO          = true
 local NEAREST       = true
 local CATCH_TIMEOUT = 3500
-local ORDER_RETRY_DELAY = 1000
+local ORDER_RETRY_DELAY = 100
 local ORDER_STALE_MS = 120000
-local ORDER_COLLECT_MS = 10
+local ORDER_COLLECT_MS = 2
 local order_collect_start = 0
 local order_collect_until = 0
 
@@ -149,9 +169,79 @@ goal_keyboard_replace = false
 goal_keyboard_save = false
 goal_keyboard_cancel = false
 
+-- === Горячая клавиша открытия меню ===
+menu_key         = 0
+menu_key_held    = false
+menu_key_capture = false
+menu_key_changed = false
+
+local VK_SPECIAL = {
+    [8] = 'Backspace', [9] = 'Tab', [13] = 'Enter', [16] = 'Shift', [17] = 'Ctrl',
+    [18] = 'Alt', [19] = 'Pause', [20] = 'CapsLock', [27] = 'Esc', [32] = 'Space',
+    [33] = 'PgUp', [34] = 'PgDn', [35] = 'End', [36] = 'Home', [37] = 'Left',
+    [38] = 'Up', [39] = 'Right', [40] = 'Down', [45] = 'Insert', [46] = 'Delete',
+    [91] = 'Win', [92] = 'Win', [93] = 'Menu', [106] = 'Num *', [107] = 'Num +',
+    [109] = 'Num -', [110] = 'Num .', [111] = 'Num /', [186] = ';', [187] = '=',
+    [188] = ',', [189] = '-', [190] = '.', [191] = '/', [192] = '`',
+    [219] = '[', [220] = '\\', [221] = ']', [222] = "'",
+}
+
+local function key_vk_name(vk)
+    vk = tonumber(vk) or 0
+    if vk <= 0 then return '-' end
+    if VK_SPECIAL[vk] then return VK_SPECIAL[vk] end
+    if vk >= 48 and vk <= 57 then return string.char(vk) end
+    if vk >= 65 and vk <= 90 then return string.char(vk) end
+    if vk >= 96 and vk <= 105 then return 'Num ' .. tostring(vk - 96) end
+    if vk >= 112 and vk <= 123 then return 'F' .. tostring(vk - 111) end
+    return 'VK ' .. tostring(vk)
+end
+
+local function is_modifier_key(vk)
+    return vk == 16 or vk == 17 or vk == 18 or vk == 91 or vk == 92 or vk == 93
+end
+
+local function chat_busy()
+    if type(sampIsChatInputActive) == 'function' then
+        local ok, res = pcall(sampIsChatInputActive)
+        if ok and res == true then return true end
+    end
+    if type(sampIsDialogActive) == 'function' then
+        local ok, res = pcall(sampIsDialogActive)
+        if ok and res == true then return true end
+    end
+    return false
+end
+
+local function text_input_active()
+    local ok, res = pcall(function() return imgui.GetIO().WantTextInput end)
+    return ok and res == true
+end
+
 addEventHandler("onWindowMessage", function(msg, wparam)
     if msg == 6 then
         gta = wparam ~= 0
+    end
+
+    if menu_key_capture then
+        if msg == 0x100 then
+            if wparam == 0x1B then
+                menu_key_capture = false
+                consumeWindowMessage(true, true)
+                return
+            elseif is_modifier_key(wparam) then
+                consumeWindowMessage(true, true)
+                return
+            else
+                menu_key = wparam
+                menu_key_held = true
+                menu_key_capture = false
+                menu_key_changed = true
+                consumeWindowMessage(true, true)
+                return
+            end
+        end
+        return
     end
 
     if goal_keyboard_editor then
@@ -192,6 +282,23 @@ addEventHandler("onWindowMessage", function(msg, wparam)
         end
     end
 
+    if msg == 0x101 and menu_key > 0 and wparam == menu_key then
+        menu_key_held = false
+    end
+
+    if msg == 0x100 and menu_key > 0 and wparam == menu_key and not menu_key_held
+        and gta and not goal_keyboard_editor and not text_input_active()
+        and not chat_busy() then
+        menu_key_held = true
+        menu_open.v = not menu_open.v
+        if not menu_open.v then
+            goal_keyboard_editor = false
+            imgui.ShowCursor = false
+        end
+        consumeWindowMessage(true, false)
+        return
+    end
+
     if msg == 0x100 and wparam == 0x1B and menu_open.v then
         menu_open.v = false
         imgui.ShowCursor = false
@@ -205,6 +312,7 @@ end)
 
 local defaults = {
     window  = { x = 100, y = 100, show = true },
+    meter   = { x = 100, y = 430, show = true },
     session = { rides = 0, money = 0, best_ride = 0, unfinished = 0 },
     day     = { date = '', rides = 0, money = 0, worked = 0, boxes = 0, coins = 0, tips = 0, tips_cash = 0 },
     ui      = { notify = 1,
@@ -218,6 +326,7 @@ local cfg = inicfg.load(defaults, config_path)
 
 local UI_DEFAULTS = {
     notify = 1,
+    meter_show = 1, meter_auto = 1,
     s_rides = 1, s_money = 1, s_avg = 1, s_time = 1,
     d_money = 1, d_worked = 1, d_rides = 1, d_boxes = 1, d_coins = 1, d_tips = 1, d_avg = 0,
     max_distance = 3500, bot_only = 0, auto_catch = 1, catch_mode = 2, goal_amount = 0,
@@ -225,6 +334,12 @@ local UI_DEFAULTS = {
 }
 
 if type(cfg.ui) ~= 'table' then cfg.ui = {} end
+if type(cfg.meter) ~= 'table' then cfg.meter = {} end
+if cfg.meter.x == nil then cfg.meter.x = 100 end
+if cfg.meter.y == nil then cfg.meter.y = 430 end
+if cfg.meter.show == nil then cfg.meter.show = true end
+menu_key = math.max(0, math.floor(tonumber(cfg.ui.menu_key) or 114))
+cfg.ui.menu_key = menu_key
 
 local uib = {}
 for key, def in pairs(UI_DEFAULTS) do
@@ -512,6 +627,9 @@ local notification = {
     ride_money = 0,
     session_money = 0,
     day_money = 0,
+    meter_base = 0,
+    meter_k = 0,
+    meter_income = 0,
 }
 
 local NOTIFY_DURATION = 7000
@@ -712,6 +830,197 @@ local function save()
     history_sync()
 end
 
+-- === Таксометр: реальный доход в реальном времени ===
+local METER_DRAW_LINGER = 12000
+local METER_MIN_COEFF   = 0.1
+local METER_MAX_COEFF   = 500
+
+local meter = {
+    type = '',
+    active = false,
+    base = 0,
+    peak = 0,
+    timer = 0,
+    started = 0,
+    last_base = 0,
+    last_end = 0,
+    last_seen = 0,
+    paid = 0,
+    paid_ms = 0,
+    car = '',
+}
+
+local meter_data = {}
+
+local meter_show = imgui.ImBool(cfg.meter.show == true or cfg.meter.show == 'true' or cfg.meter.show == 1)
+local meter_edit = false
+
+local function meter_file()
+    return script_base() .. '\\config\\TaxiHelper_meter.json'
+end
+
+local function meter_save()
+    if type(encodeJson) ~= 'function' then return end
+    local ok, data = pcall(encodeJson, meter_data)
+    if not ok or type(data) ~= 'string' then return end
+    local path = meter_file()
+    local tmp = path .. '.tmp'
+    local f = io.open(tmp, 'wb')
+    if not f then return end
+    local written = f:write(data)
+    local closed = f:close()
+    if not written or not closed then os.remove(tmp) return end
+    os.remove(path)
+    if not os.rename(tmp, path) then os.remove(tmp) end
+end
+
+local function meter_load()
+    meter_data = {}
+    if type(decodeJson) ~= 'function' then return end
+    local f = io.open(meter_file(), 'rb')
+    if not f then return end
+    local data = f:read('*a')
+    f:close()
+    local ok, parsed = pcall(decodeJson, data or '')
+    if not ok or type(parsed) ~= 'table' then return end
+    for car, rec in pairs(parsed) do
+        if type(rec) == 'table' and tonumber(rec.k) then
+            meter_data[tostring(car)] = { k = tonumber(rec.k), n = math.max(1, math.floor(tonumber(rec.n) or 1)) }
+        end
+    end
+end
+
+local function meter_coeff_str(k)
+    k = tonumber(k) or 0
+    if k <= 0 then return '--' end
+    local s = string.format('%.4f', k)
+    s = s:gsub('0+$', ''):gsub('%.$', '')
+    return s
+end
+
+local function meter_short_money(n)
+    n = tonumber(n) or 0
+    if n >= 1000000000 then return string.format('%.1fB', n / 1000000000) end
+    if n >= 1000000 then return string.format('%.1fM', n / 1000000) end
+    if n >= 1000 then return string.format('%.0fK', n / 1000) end
+    return tostring(math.floor(n))
+end
+
+local function meter_saved_coeff()
+    if meter.car ~= '' then
+        local rec = meter_data[meter.car]
+        if rec and rec.k then return rec.k end
+    end
+    return 0
+end
+
+local function meter_active_coeff()
+    if uib.meter_auto.v then
+        local k = meter_saved_coeff()
+        if k > 0 then return k end
+        if meter.car == '' then return tonumber(cfg.ui.meter_coeff) or 0 end
+        return 0
+    end
+    return tonumber(cfg.ui.meter_coeff) or 0
+end
+
+local function meter_sync_input()
+    if not TaxiHelperUi or not TaxiHelperUi.meterInput then return end
+    local k = tonumber(cfg.ui.meter_coeff) or 0
+    TaxiHelperUi.meterInput.v = (k > 0) and string.format('%.4f', k) or ''
+end
+
+local function meter_calibrate(paid)
+    paid = tonumber(paid) or 0
+    if paid <= 0 then return end
+    if meter.paid_ms > 0 and game_ms() - meter.paid_ms < 5000 then return end
+    local base = math.max(meter.base or 0, meter.peak or 0, meter.last_base or 0)
+    if base <= 0 then return end
+    local fresh = (meter.last_end > 0 and game_ms() - meter.last_end <= 90000)
+        or (meter.active and base > 0)
+    if not fresh then return end
+    local k = paid / base
+    if k < METER_MIN_COEFF or k > METER_MAX_COEFF then return end
+    meter.paid = paid
+    meter.paid_ms = game_ms()
+    if meter.car ~= '' then
+        local rec = meter_data[meter.car]
+        meter_data[meter.car] = { k = k, n = (rec and rec.n or 0) + 1 }
+        meter_save()
+        event_add(string.format('Таксометр: %s, коэффициент x%s', meter.car, meter_coeff_str(k)))
+    end
+    if uib.meter_auto.v then
+        cfg.ui.meter_coeff = k
+        meter_sync_input()
+    end
+    save()
+end
+
+local function meter_handle_cef(str)
+    if not str then return end
+    if str:find('customizedCounter.initializeType', 1, true) then
+        local payload = str:match('`(.-)`') or ''
+        meter.type = payload:match('"([^"]*)"') or ''
+        if meter.type ~= 'taxi' then
+            meter.active = false
+            meter.base = 0
+            meter.peak = 0
+        end
+        return
+    end
+    if str:find('customizedCounter.initializeCounter', 1, true) then
+        if meter.type ~= 'taxi' then return end
+        local payload = str:match('`(.-)`') or ''
+        local v = tonumber(payload:match('"(%d+)"') or payload:match('(%d+)'))
+        if not v then return end
+        if v == 0 and not meter.active then
+            meter.started = game_ms()
+            meter.paid, meter.paid_ms = 0, 0
+        elseif v > 0 and not meter.active then
+            meter.active = true
+            meter.started = game_ms()
+        end
+        meter.base = v
+        if v > meter.peak then meter.peak = v end
+        meter.last_seen = game_ms()
+        return
+    end
+    if str:find('customizedCounter.initializeTimerRevert', 1, true) then
+        if meter.type ~= 'taxi' then return end
+        local payload = str:match('`(.-)`') or ''
+        meter.timer = tonumber(payload:match('(%d+)')) or meter.timer
+        return
+    end
+    if str:find('arizonahud.updateCustomizedCounterVisibility', 1, true) then
+        local payload = str:match('`(.-)`') or ''
+        local visible = payload:find('true', 1, true) ~= nil
+        if visible then
+            if not meter.active then
+                meter.active = true
+                meter.base = 0
+                meter.peak = 0
+                meter.started = game_ms()
+                meter.paid, meter.paid_ms = 0, 0
+                meter.last_seen = game_ms()
+            end
+        elseif meter.active then
+            meter.active = false
+            meter.last_base = math.max(meter.base, meter.peak)
+            meter.last_end = game_ms()
+        end
+        if not visible then meter.type = '' end
+        return
+    end
+    if str:find('arizonaDriver.initializeDriver', 1, true) then
+        local payload = str:match('`(.-)`') or ''
+        local car = payload:match('"car"%s*:%s*"([^"]*)"')
+        if car and car ~= '' then
+            meter.car = car
+            meter_sync_input()
+        end
+    end
+end
+
 local function reset_day_rewards()
     cfg.day.boxes     = 0
     cfg.day.coins     = 0
@@ -743,6 +1052,7 @@ local function check_new_day()
 end
 
 local function add_ride(money)
+    meter_calibrate(money)
     check_new_day()
     cfg.session.rides     = (tonumber(cfg.session.rides) or 0) + 1
     cfg.session.money     = (tonumber(cfg.session.money) or 0) + money
@@ -755,6 +1065,11 @@ local function add_ride(money)
     save()
     event_add(string.format("Поездка завершена: $%s", tostring(math.floor(money))))
     show_ride_notification(money)
+    local mb = math.max(meter.base or 0, meter.peak or 0, meter.last_base or 0)
+    local mk = meter_active_coeff()
+    notification.meter_base = mb
+    notification.meter_k = mk
+    notification.meter_income = (mk > 0 and mb > 0) and math.floor(mb * mk + 0.5) or 0
 end
 
 local function finish_work_interval()
@@ -806,6 +1121,12 @@ end
 TaxiHelperUi = {}
 TaxiHelperUi.distanceInput = imgui.ImBuffer(32)
 TaxiHelperUi.distanceInput.v = format_money(cfg.ui.max_distance or 3500)
+TaxiHelperUi.meterInput = imgui.ImBuffer(16)
+do
+    local k = tonumber(cfg.ui.meter_coeff) or 0
+    TaxiHelperUi.meterInput.v = (k > 0) and string.format('%.4f', k) or ''
+end
+TaxiHelperUi.meterDirty = false
 TaxiHelperUi.numericEditActive = { goal_amount = false, max_distance = false }
 TaxiHelperUi.numericDirty = { goal_amount = false, max_distance = false }
 
@@ -1143,6 +1464,7 @@ local function onCef(str)
 end
 
 local function process_cef(str)
+    meter_handle_cef(str)
     onCef(str)
     if str:find('damageInformer.initializeDamageInfo', 1, true) then
         local payload = str:match('`(.*)`')
@@ -1331,7 +1653,7 @@ function AHKMessage(text, color)
     sampAddChatMessage('{AA66FF}[Taxi Helper]{FFFFFF} ' .. tostring(text), color or -1)
 end
 
-UPDATE_CURRENT_VERSION = '2.4'
+UPDATE_CURRENT_VERSION = '2.5'
 do
     local ok_v, v = pcall(function() return thisScript().version end)
     if ok_v and type(v) == 'string' and v:match('^%d+%.%d+') then UPDATE_CURRENT_VERSION = v end
@@ -2270,6 +2592,79 @@ local function draw_settings()
         show.v = true
         menu_open.v = false
     end
+    menu_section(L.sec_keys)
+    icon_text('settings', L.menu_key, MUTED)
+    imgui.SameLine(200)
+    local key_label = menu_key_capture and L.key_press
+        or (L.key_bind .. ': ' .. ((menu_key > 0) and key_vk_name(menu_key) or L.key_none))
+    if TaxiHelperUi.actionButton(key_label .. '##th_menu_key', 230, 28, menu_key_capture) then
+        menu_key_capture = not menu_key_capture
+        menu_key_held = false
+    end
+    imgui.SameLine(nil, 6)
+    if TaxiHelperUi.actionButton(L.key_off .. '##th_menu_key_off', 90, 28) then
+        menu_key = 0
+        menu_key_held = false
+        menu_key_capture = false
+        menu_key_changed = true
+    end
+    if menu_key_capture then
+        imgui.TextColored(MUTED, L.key_hint)
+    else
+        imgui.TextColored(MUTED, L.key_note)
+    end
+    imgui.Spacing()
+    menu_section(L.sec_meter)
+    if ui_toggle('meter_show', L.meter_show, meter_show) then
+        cfg.meter.show = meter_show.v
+        save()
+    end
+    if ui_toggle('meter_auto', L.meter_auto, uib.meter_auto) then ui_commit('meter_auto') end
+    icon_text('earned', L.meter_coeff, MUTED)
+    imgui.SameLine(200)
+    imgui.PushItemWidth(150)
+    if imgui.InputText('##th_meter_coeff', TaxiHelperUi.meterInput) then
+        local v = tonumber((TaxiHelperUi.meterInput.v or ''):gsub(',', '.'))
+        if v and v >= METER_MIN_COEFF and v <= METER_MAX_COEFF then
+            cfg.ui.meter_coeff = v
+            if uib.meter_auto.v then
+                uib.meter_auto.v = false
+                cfg.ui.meter_auto = 0
+            end
+            TaxiHelperUi.meterDirty = true
+        end
+    end
+    imgui.PopItemWidth()
+    if TaxiHelperUi.meterDirty and not imgui.IsItemActive() then
+        TaxiHelperUi.meterDirty = false
+        save()
+    end
+    imgui.Spacing()
+    local meter_rec = (meter.car ~= '') and meter_data[meter.car] or nil
+    if meter_rec then
+        imgui.TextColored(MUTED, u8('Машина: ') .. meter.car .. u8('  -  x') .. meter_coeff_str(meter_rec.k)
+            .. '  (' .. tostring(meter_rec.n) .. u8(' рейс.)'))
+    else
+        local prefix = (meter.car ~= '') and (u8('Машина: ') .. meter.car .. u8('  -  ')) or ''
+        imgui.TextColored(MUTED, prefix .. L.meter_need)
+    end
+    imgui.Spacing()
+    if TaxiHelperUi.actionButton(L.meter_reset .. '##th_meter_reset', 220, 28) then
+        if meter.car ~= '' then
+            meter_data[meter.car] = nil
+            meter_save()
+        end
+        cfg.ui.meter_coeff = 0
+        meter_sync_input()
+        save()
+    end
+    imgui.Spacing()
+    if TaxiHelperUi.actionButton(L.meter_move .. '##th_meter_move', 260, 30) then
+        meter_edit = true
+        meter_show.v = true
+        cfg.meter.show = true
+        menu_open.v = false
+    end
     menu_section(L.sec_goal)
     imgui.Text(L.goal_amount)
     imgui.SameLine(200)
@@ -2372,6 +2767,76 @@ local function draw_settings()
         end
     end
     imgui.EndChild()
+end
+
+local function meter_draw()
+    if not meter_show.v then return end
+    local visible = meter_edit or (meter.active and meter.type == 'taxi')
+        or (meter.last_end > 0 and (game_ms() - meter.last_end) < METER_DRAW_LINGER)
+    if not visible then return end
+    local base = meter.active and meter.base or meter.last_base
+    local k = meter_active_coeff()
+    local income = (k > 0) and math.floor(base * k + 0.5) or nil
+    local elapsed = 0
+    if meter.active and meter.started > 0 then
+        elapsed = math.max(0, math.floor((game_ms() - meter.started) / 1000))
+    end
+    local flags = imgui.WindowFlags.NoTitleBar + imgui.WindowFlags.NoResize
+        + imgui.WindowFlags.NoScrollbar + imgui.WindowFlags.NoSavedSettings
+    if not meter_edit then
+        flags = flags + imgui.WindowFlags.NoMove + imgui.WindowFlags.NoInputs
+    end
+    imgui.SetNextWindowPos(imgui.ImVec2(tonumber(cfg.meter.x) or 100, tonumber(cfg.meter.y) or 430), imgui.Cond.FirstUseEver)
+    imgui.SetNextWindowSize(imgui.ImVec2(300, meter_edit and 172 or 124), imgui.Cond.Always)
+    imgui.PushStyleVar(imgui.StyleVar.WindowRounding, 10)
+    imgui.PushStyleVar(imgui.StyleVar.WindowPadding, imgui.ImVec2(13, 10))
+    imgui.PushStyleVar(imgui.StyleVar.ItemSpacing, imgui.ImVec2(8, 3))
+    imgui.PushStyleColor(imgui.Col.WindowBg, WINDOW_BG)
+    imgui.PushStyleColor(imgui.Col.Border, WINDOW_BORDER)
+    imgui.Begin(u8'##TaxiMeter', meter_show, flags)
+    imgui.PushFont(fontsize)
+    imgui.TextColored(TAXI_YELLOW, L.meter_title)
+    local k_str = (k > 0) and ('x' .. meter_coeff_str(k)) or 'x --'
+    imgui.SameLine(imgui.GetWindowWidth() - imgui.CalcTextSize(k_str).x - 13)
+    imgui.TextColored(k > 0 and ACCENT or MUTED, k_str)
+    imgui.Separator()
+    icon_text('earned', L.meter_base)
+    imgui.SameLine(132)
+    draw_money(base)
+    icon_text('earned', L.meter_income)
+    imgui.SameLine(132)
+    if income then
+        imgui.TextColored(ACCENT, '$ ' .. format_money(income))
+    else
+        imgui.TextDisabled('--')
+    end
+    if meter.active then
+        local extra = ''
+        if elapsed >= 15 and income and income > 0 then
+            extra = '   ~' .. meter_short_money(income * 3600 / elapsed) .. u8'/ч'
+        end
+        icon_text('time', L.meter_time)
+        imgui.SameLine(132)
+        imgui.Text(format_time(elapsed) .. extra)
+    elseif meter.paid > 0 and (game_ms() - meter.paid_ms) < METER_DRAW_LINGER then
+        icon_text('earned', L.meter_paid)
+        imgui.SameLine(132)
+        imgui.TextColored(DOLLAR_COLOR, '$ ' .. format_money(meter.paid))
+    end
+    imgui.PopFont()
+    if meter_edit then
+        if imgui.Button('[+] ' .. L.save_pos, imgui.ImVec2(-1, 26)) then
+            local pos = imgui.GetWindowPos()
+            cfg.meter.x = math.floor(pos.x)
+            cfg.meter.y = math.floor(pos.y)
+            save()
+            meter_edit = false
+            imgui.ShowCursor = false
+        end
+    end
+    imgui.End()
+    imgui.PopStyleColor(2)
+    imgui.PopStyleVar(3)
 end
 
 local calendar_month = os.date('*t').month
@@ -2564,8 +3029,8 @@ local function draw_menu()
 end
 
 function imgui.OnDrawFrame()
-    imgui.ShowCursor = edit_mode or menu_open.v
-    imgui.LockPlayer = menu_open.v
+    imgui.ShowCursor = edit_mode or menu_open.v or meter_edit
+    imgui.LockPlayer = menu_open.v or meter_edit
 
     if show.v then
         local flags = imgui.WindowFlags.NoTitleBar + imgui.WindowFlags.AlwaysAutoResize
@@ -2713,6 +3178,8 @@ function imgui.OnDrawFrame()
         imgui.PopStyleVar(3)
     end
 
+    meter_draw()
+
     local alpha = notification_alpha()
     if alpha > 0 then
         local io = imgui.GetIO()
@@ -2725,7 +3192,8 @@ function imgui.OnDrawFrame()
             + imgui.WindowFlags.NoInputs
 
         local goal_enabled = (tonumber(cfg.ui.goal_amount) or 0) > 0
-        imgui.SetNextWindowSize(imgui.ImVec2(395, goal_enabled and 251 or 174), imgui.Cond.Always)
+        local meter_line = ((notification.meter_k or 0) > 0 and (notification.meter_base or 0) > 0)
+        imgui.SetNextWindowSize(imgui.ImVec2(395, (goal_enabled and 251 or 174) + (meter_line and 26 or 0)), imgui.Cond.Always)
         imgui.SetNextWindowPos(
             imgui.ImVec2(io.DisplaySize.x * 0.5, io.DisplaySize.y * 0.12 + (1.0 - alpha) * 12),
             imgui.Cond.Always,
@@ -2767,6 +3235,13 @@ function imgui.OnDrawFrame()
         icon_text('day', L.day_sum)
         imgui.SameLine(amount_x)
         imgui.TextColored(imgui.ImVec4(0.35, 1.0, 0.35, 1.0), '$ ' .. format_money(notification.day_money))
+        if meter_line then
+            imgui.Spacing()
+            local meter_text = L.meter_title .. '  x' .. meter_coeff_str(notification.meter_k)
+                .. '  =  $ ' .. format_money(notification.meter_income)
+            imgui.SetCursorPosX((imgui.GetWindowWidth() - imgui.CalcTextSize(meter_text).x) / 2)
+            imgui.TextColored(MUTED, meter_text)
+        end
         imgui.PopFont()
         local goal_amount = math.max(0, tonumber(cfg.ui.goal_amount) or 0)
         if goal_amount > 0 then
@@ -2858,6 +3333,7 @@ function main()
     TaxiHelperSound.ensure_yandex()
     update_check()
     history_load()
+    meter_load()
     event_load()
 
     local recovered = tonumber(cfg.session.unfinished) or 0
@@ -2873,16 +3349,26 @@ function main()
 
     sampRegisterChatCommand('thelper', function()
         menu_open.v = not menu_open.v
-        if not menu_open.v then goal_keyboard_editor = false end
+        if not menu_open.v then
+            goal_keyboard_editor = false
+            menu_key_capture = false
+        end
     end)
 
-    AHKMessage('Успешно загружен. Меню - /thelper')
+    AHKMessage('Успешно загружен. Меню - /thelper'
+        .. ((menu_key > 0) and (' или ' .. key_vk_name(menu_key)) or ''))
     local startup_update_notice_pending = true
     local last_connected = false
     local last_tick = 0
     local last_order_poll = 0
 
     while true do
+        if menu_key_changed then
+            menu_key_changed = false
+            cfg.ui.menu_key = menu_key
+            save()
+        end
+        if menu_key_capture and not menu_open.v then menu_key_capture = false end
         if goal_keyboard_editor and not menu_open.v then goal_keyboard_editor = false end
         if not menu_open.v or menu_tab ~= 2 then
             if TaxiHelperUi.numericDirty.max_distance then
@@ -2892,7 +3378,8 @@ function main()
                 save()
             end
         end
-        imgui.Process = gta and (show.v or notification.active or menu_open.v)
+        imgui.Process = gta and (show.v or notification.active or menu_open.v or meter_edit
+            or (meter_show.v and (meter.active or (meter.last_end > 0 and (game_ms() - meter.last_end) < METER_DRAW_LINGER))))
         if startup_update_notice_pending then
             if update_state == 'available' then
                 AHKMessage('Доступно обновление TaxiHelper v' .. update_latest .. '.', 0x55FF77)
@@ -2936,6 +3423,12 @@ function main()
                 last_unfinished_save = t
             end
             check_new_day()
+            if meter.active and meter.last_seen > 0 and game_ms() - meter.last_seen > 180000 then
+                meter.active = false
+                meter.last_base = math.max(meter.base, meter.peak)
+                meter.last_end = game_ms()
+                meter.type = ''
+            end
             while #pending_deliveries > 0 and t - pending_deliveries[1] > PAYMENT_TIMEOUT do
                 table.remove(pending_deliveries, 1)
             end
