@@ -898,8 +898,6 @@ local function meter_coeff_str(k)
     return s
 end
 
--- Название машины приходит из CEF в CP1251. imgui ждёт UTF-8,
--- поэтому перед выводом конвертируем, если строка не является корректным UTF-8.
 function meter_car_display(car)
     car = tostring(car or '')
     if car == '' then return '' end
