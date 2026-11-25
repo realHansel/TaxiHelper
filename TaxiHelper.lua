@@ -1,5 +1,5 @@
-script_name('Taxi Helper 2.5.1')
-script_version('2.5.1')
+script_name('Taxi Helper 2.5')
+script_version('2.5')
 
 require 'lib.moonloader'
 local sampev = require 'samp.events'
@@ -1684,7 +1684,7 @@ function AHKMessage(text, color)
     sampAddChatMessage('{AA66FF}[Taxi Helper]{FFFFFF} ' .. tostring(text), color or -1)
 end
 
-UPDATE_CURRENT_VERSION = '2.5'
+UPDATE_CURRENT_VERSION = '2.5.1'
 do
     local ok_v, v = pcall(function() return thisScript().version end)
     if ok_v and type(v) == 'string' and v:match('^%d+%.%d+') then UPDATE_CURRENT_VERSION = v end
